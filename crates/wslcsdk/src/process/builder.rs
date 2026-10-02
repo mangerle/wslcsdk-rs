@@ -92,11 +92,32 @@ impl ProcessBuilder {
 
     /// 追加一条环境变量
     ///
-    /// 同名变量可重复追加，行为与官方一致；`key` 或 `value` 含等号会导致
-    /// 生成的 `key=value` 串被错误解析，调用方需自行保证二者不含`=`。
-    pub fn env(mut self, key: &str, value: &str) -> Self {
+    /// 同名变量可重复追加，行为与官方一致。
+    ///
+    /// # 参数约束
+    ///
+    /// `key` 不得含等号或空字符：环境变量以 `key=value` 单串形式交付官方，
+    /// 键中含 `=` 会让官方按第一个等号切分，把本属键名的部分误并入值；
+    /// 而键名若来自外部输入（配置文件、HTTP 请求、CI 变量），这就构成一处
+    /// 环境变量注入面——注入者可借此覆盖容器内的 `PATH`、`LD_PRELOAD` 等。
+    /// 故在库内直接拒绝，不再把校验责任推给调用方。`value` 则可含等号。
+    ///
+    /// # Errors
+    ///
+    /// `key` 含等号或空字符时返回 [`WslcError::InvalidConfiguration`]。
+    pub fn env(mut self, key: &str, value: &str) -> Result<Self, WslcError> {
+        if key.contains('=') {
+            return Err(WslcError::InvalidConfiguration(format!(
+                "环境变量名不得含等号，否则官方会将其误解析为键值分隔: {key}"
+            )));
+        }
+        if key.is_empty() {
+            return Err(WslcError::InvalidConfiguration(
+                "环境变量名不得为空".to_string(),
+            ));
+        }
         self.env_variables.push(format!("{key}={value}"));
-        self
+        Ok(self)
     }
 
     /// 开启或关闭进程的标准输入
@@ -330,10 +351,44 @@ mod tests {
             .command(&["/bin/env"])
             .working_directory("/tmp")
             .env("A", "1")
+            .expect("环境变量名合法")
             .env("B", "2")
+            .expect("环境变量名合法")
             .enable_stdin(true)
             .enable_stdin(false);
         // 链式配置后仍能生成合法的底层进程设置
+        assert!(builder.build_raw_settings().is_ok());
+    }
+
+    /// 环境变量名含等号必须被拒绝
+    ///
+    /// 环境变量以 `key=value` 单串交付官方，键名含 `=` 会让官方按首个等号
+    /// 切分，把本属键名的部分误并入值。键名若来自外部输入，注入者可借此
+    /// 覆盖容器内的 PATH、LD_PRELOAD 等，构成环境变量注入面。
+    #[test]
+    fn test_env_key_with_equal_sign_is_rejected() {
+        let builder = ProcessBuilder::new().command(&["/bin/env"]);
+        match builder.env("PATH=/evil", "/bin") {
+            Err(WslcError::InvalidConfiguration(_)) => {}
+            Ok(_) => panic!("预期返回 InvalidConfiguration，实际却接受了该键名"),
+            Err(other) => panic!("预期返回 InvalidConfiguration，实际为: {other}"),
+        }
+    }
+
+    /// 空环境变量名同样必须被拒绝，否则会生成 `=value` 这类无键名条目
+    #[test]
+    fn test_empty_env_key_is_rejected() {
+        let builder = ProcessBuilder::new().command(&["/bin/env"]);
+        assert!(builder.env("", "1").is_err());
+    }
+
+    /// 值中含等号是合法的（如某些配置串），不得误伤
+    #[test]
+    fn test_equal_sign_in_env_value_is_accepted() {
+        let builder = ProcessBuilder::new()
+            .command(&["/bin/env"])
+            .env("CONFIG", "a=b=c")
+            .expect("值含等号应被接受");
         assert!(builder.build_raw_settings().is_ok());
     }
 

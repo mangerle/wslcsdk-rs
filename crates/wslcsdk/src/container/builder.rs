@@ -377,7 +377,8 @@ mod tests {
         let process_builder = ProcessBuilder::new()
             .command(&["/bin/bash", "-c", "echo hello"])
             .working_directory("/workspace")
-            .env("ENV_KEY", "ENV_VAL");
+            .env("ENV_KEY", "ENV_VAL")
+            .expect("环境变量名合法");
 
         let builder = ContainerBuilder::new("ubuntu:latest")
             .name("test-container")

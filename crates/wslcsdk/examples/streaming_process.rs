@@ -18,7 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (builder, mut streams) = ProcessBuilder::new()
         .command(&["/bin/sh", "-c", "echo '来自 WSL 容器的问候' && ls -la /"])
         .working_directory("/")
-        .env("EXAMPLE_ENV", "wslcsdk")
+        .env("EXAMPLE_ENV", "wslcsdk")?
         .with_streaming_io();
 
     let process = builder.spawn(&container)?;

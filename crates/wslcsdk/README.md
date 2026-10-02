@@ -26,11 +26,11 @@ Add this crate to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-wslcsdk = "0.1.0"
+wslcsdk = "0.2.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
-> **Compatibility**: `wslcsdk 0.1.x` is built on top of `wslcsdk-sys 3.0.1` and requires Windows 11 with WSL 2.9.3+ or 3.0.1+.
+> **Compatibility**: `wslcsdk 0.2.x` is built on top of `wslcsdk-sys 3.0.1` and requires Windows 11 with WSL 2.9.3+ or 3.0.1+.
 
 ---
 

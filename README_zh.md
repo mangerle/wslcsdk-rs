@@ -27,7 +27,7 @@
 wslcsdk-rs/
 ├── crates/
 │   ├── wslcsdk-sys/     # 原始 1:1 C-ABI FFI 绑定层 (版本 3.0.1)
-│   └── wslcsdk/         # 惯用安全 Rust 封装层 (版本 0.1.0)
+│   └── wslcsdk/         # 惯用安全 Rust 封装层 (版本 0.2.0)
 │       └── examples/    # 经过编译验证的可运行示例
 ├── Cargo.toml           # 根工作区配置
 ├── LICENSE              # MIT 开源许可证
@@ -38,7 +38,7 @@ wslcsdk-rs/
 | Crate | 版本 | 描述 |
 | :--- | :--- | :--- |
 | [`wslcsdk-sys`](crates/wslcsdk-sys) | `3.0.1` | 严格 1:1 映射微软官方 `wslcsdk.h` 头文件全部 C 接口；内置 MSVC `/DELAYLOAD` 延迟加载及 `x64` / `arm64` 预编译导入库。 |
-| [`wslcsdk`](crates/wslcsdk) | `0.1.0` | 拥有 RAII 生命周期管理、双层强类型错误体系、与运行时解耦的流式 I/O 管道及非阻塞扩展的高级安全 Rust 抽象。 |
+| [`wslcsdk`](crates/wslcsdk) | `0.2.0` | 拥有 RAII 生命周期管理、双层强类型错误体系、与运行时解耦的流式 I/O 管道及非阻塞扩展的高级安全 Rust 抽象。 |
 
 ---
 
@@ -67,7 +67,7 @@ wslcsdk-rs/
 
 ```toml
 [dependencies]
-wslcsdk = "0.1.0"
+wslcsdk = "0.2.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 

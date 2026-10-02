@@ -26,11 +26,11 @@
 
 ```toml
 [dependencies]
-wslcsdk = "0.1.0"
+wslcsdk = "0.2.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
-> **兼容性说明**：`wslcsdk 0.1.x` 基于底层 `wslcsdk-sys 3.0.1`，要求 Windows 11 宿主机并安装 WSL 2.9.3+ 或 3.0.1+。
+> **兼容性说明**：`wslcsdk 0.2.x` 基于底层 `wslcsdk-sys 3.0.1`，要求 Windows 11 宿主机并安装 WSL 2.9.3+ 或 3.0.1+。
 
 ---
 

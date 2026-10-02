@@ -27,7 +27,7 @@ This repository is organized as a Cargo workspace with a clear separation of con
 wslcsdk-rs/
 ├── crates/
 │   ├── wslcsdk-sys/     # Raw 1:1 C-ABI FFI bindings (Version 3.0.1)
-│   └── wslcsdk/         # High-level idiomatic, safe Rust SDK (Version 0.1.0)
+│   └── wslcsdk/         # High-level idiomatic, safe Rust SDK (Version 0.2.0)
 │       └── examples/    # Compile-verified runnable samples
 ├── Cargo.toml           # Root workspace configuration
 ├── LICENSE              # MIT License
@@ -38,7 +38,7 @@ wslcsdk-rs/
 | Crate | Version | Description |
 | :--- | :--- | :--- |
 | [`wslcsdk-sys`](crates/wslcsdk-sys) | `3.0.1` | Raw FFI declarations matching `wslcsdk.h` with MSVC `/DELAYLOAD` and precompiled import libraries for `x64` and `arm64`. |
-| [`wslcsdk`](crates/wslcsdk) | `0.1.0` | Safe RAII handles, two-layer typed error model, runtime-agnostic streaming process I/O, and async execution wrappers. |
+| [`wslcsdk`](crates/wslcsdk) | `0.2.0` | Safe RAII handles, two-layer typed error model, runtime-agnostic streaming process I/O, and async execution wrappers. |
 
 ---
 
@@ -67,7 +67,7 @@ Add `wslcsdk` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-wslcsdk = "0.1.0"
+wslcsdk = "0.2.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 

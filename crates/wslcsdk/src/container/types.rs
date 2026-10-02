@@ -24,6 +24,12 @@ pub struct ContainerPortMappingData {
     pub bind_ip: Option<IpAddr>,
 }
 
+/// 解析端口映射中的单个端口号，失败时按所在方位给出可定位的描述
+fn parse_port(text: &str, side: &str) -> Result<u16, WslcError> {
+    text.parse()
+        .map_err(|e| WslcError::InvalidConfiguration(format!("{side}端口非法: {e}")))
+}
+
 impl FromStr for ContainerPortMappingData {
     type Err = WslcError;
 
@@ -71,35 +77,32 @@ impl FromStr for ContainerPortMappingData {
             });
         }
 
-        let parts: Vec<&str> = main_part.split(':').collect();
-        match parts.len() {
-            2 => {
-                let win_port: u16 = parts[0]
-                    .parse()
-                    .map_err(|e| WslcError::InvalidConfiguration(format!("宿主机端口非法: {e}")))?;
-                let cont_port: u16 = parts[1]
-                    .parse()
-                    .map_err(|e| WslcError::InvalidConfiguration(format!("容器端口非法: {e}")))?;
+        // 以迭代器按序取样并保留「是否还有第四段」的信息，
+        // 避免为求长度与索引而 collect 出一个临时 Vec
+        let mut parts = main_part.split(':');
+        let (first, second, third, fourth) =
+            (parts.next(), parts.next(), parts.next(), parts.next());
+
+        match (first, second, third, fourth) {
+            (Some(w), Some(c), None, _) => {
+                let windows_port = parse_port(w, "宿主机")?;
+                let container_port = parse_port(c, "容器")?;
                 Ok(Self {
-                    windows_port: win_port,
-                    container_port: cont_port,
+                    windows_port,
+                    container_port,
                     protocol,
                     bind_ip: None,
                 })
             }
-            3 => {
-                let ip: IpAddr = parts[0].parse().map_err(|e| {
+            (Some(ip_str), Some(w), Some(c), None) => {
+                let ip: IpAddr = ip_str.parse().map_err(|e| {
                     WslcError::InvalidConfiguration(format!("IP 地址解析失败: {e}"))
                 })?;
-                let win_port: u16 = parts[1]
-                    .parse()
-                    .map_err(|e| WslcError::InvalidConfiguration(format!("宿主机端口非法: {e}")))?;
-                let cont_port: u16 = parts[2]
-                    .parse()
-                    .map_err(|e| WslcError::InvalidConfiguration(format!("容器端口非法: {e}")))?;
+                let windows_port = parse_port(w, "宿主机")?;
+                let container_port = parse_port(c, "容器")?;
                 Ok(Self {
-                    windows_port: win_port,
-                    container_port: cont_port,
+                    windows_port,
+                    container_port,
                     protocol,
                     bind_ip: Some(ip),
                 })

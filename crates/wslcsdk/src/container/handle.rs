@@ -71,22 +71,28 @@ struct ContainerInner {
 impl Drop for ContainerInner {
     fn drop(&mut self) {
         // 无需在此重建 COM 套间：_mta 租约保证进程级 MTA 此刻仍然存活
-        // 释放已索取的 init 进程句柄至多一次，随后清零槽位；再释放容器句柄，保证层级析构顺序
-        let mut slot = self
-            .init_process_raw
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let InitProcessSource::Borrowed(proc_raw) = *slot
-            && !proc_raw.is_null()
-        {
+        // 取出并清空槽位后，在锁外释放已索取的 init 进程句柄至多一次；
+        // 再释放容器句柄，保证层级析构顺序
+        let proc_raw = {
+            let mut slot = self
+                .init_process_raw
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let raw = match *slot {
+                InitProcessSource::Borrowed(raw) => raw,
+                InitProcessSource::Unfetched => WslcProcess::NULL,
+            };
+            *slot = InitProcessSource::Unfetched;
+            raw
+        };
+
+        if !proc_raw.is_null() {
             // SAFETY: 该句柄来自 WslcGetContainerInitProcess 且由容器统一托管，
             // 在容器析构时恰好释放至多一次，杜绝句柄泄漏。
             unsafe {
                 let _ = WslcReleaseProcess(proc_raw);
             }
         }
-        *slot = InitProcessSource::Unfetched;
-        drop(slot);
 
         if !self.raw.is_null() {
             // SAFETY: 容器句柄由本类型独占持有，此处已判空，
@@ -307,30 +313,67 @@ impl WslcContainerHandle {
     /// 底层句柄。返回的包装对象仅借用该句柄，其所有权由容器统一持有并在容器析构
     /// 时释放至多一次，因此调用多少次都不会触发重复释放。
     pub fn get_init_process(&self) -> Result<WslcProcessHandle, WslcError> {
-        // 临界区仅覆盖句柄的读取与首次索取，避免持锁执行后续逻辑
-        let raw_process = {
+        // 先在锁内查缓存：命中则无需发起任何 SDK 调用
+        if let Some(raw) = self.cached_init_process() {
+            return Ok(self.wrap_init_process(raw));
+        }
+
+        // 未缓存：在锁外发起可能长时间阻塞的 COM/RPC 调用。
+        // 持锁调用 FFI 会把所有并发的 get_init_process 串行化在一次 RPC 上，
+        // 且任一调用卡住将连带阻塞容器析构路径上的锁获取。
+        let mut raw = WslcProcess::NULL;
+        // SAFETY: 入参均为已初始化且存活期覆盖本次调用的本地缓冲区或官方句柄，
+        // 出参为合法的可写指针，不涉及未定义行为。
+        let hr = unsafe { WslcGetContainerInitProcess(self.inner.raw, &mut raw) };
+        if hr < 0 || raw.is_null() {
+            return Err(WslcError::from_hresult(hr, "获取容器主进程句柄失败"));
+        }
+
+        // 回填缓存。并发下可能有其他线程抢先写入，此时必须自行释放本次多
+        // 取的那份句柄——否则它会脱离容器托管而泄漏。
+        let effective = {
             let mut slot = self
                 .inner
                 .init_process_raw
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-            match &*slot {
-                InitProcessSource::Borrowed(raw) => *raw,
-                InitProcessSource::Unfetched => {
-                    let mut raw = WslcProcess::NULL;
-                    // SAFETY: 入参均为已初始化且存活期覆盖本次调用的本地缓冲区或官方句柄，
-                    // 出参为合法的可写指针，不涉及未定义行为。
-                    let hr = unsafe { WslcGetContainerInitProcess(self.inner.raw, &mut raw) };
-                    if hr < 0 || raw.is_null() {
-                        return Err(WslcError::from_hresult(hr, "获取容器主进程句柄失败"));
+            match *slot {
+                InitProcessSource::Borrowed(existing) => {
+                    // SAFETY: 该句柄由本次 WslcGetContainerInitProcess 返回且已判空，
+                    // 未被任何 RAII 对象接管，此处为唯一释放点。
+                    unsafe {
+                        let _ = WslcReleaseProcess(raw);
                     }
+                    existing
+                }
+                InitProcessSource::Unfetched => {
                     *slot = InitProcessSource::Borrowed(raw);
                     raw
                 }
             }
         };
 
+        Ok(self.wrap_init_process(effective))
+    }
+
+    /// 读取已缓存的 init 进程句柄，未缓存时返回 `None`
+    fn cached_init_process(&self) -> Option<WslcProcess> {
+        let slot = self
+            .inner
+            .init_process_raw
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match *slot {
+            InitProcessSource::Borrowed(raw) => Some(raw),
+            InitProcessSource::Unfetched => None,
+        }
+    }
+
+    /// 按当前流式状态把已托管的 init 进程句柄包装为借用视图
+    ///
+    /// 与 [`Self::get_init_process`] 分离，是为了让「取句柄」与「包装」各自
+    /// 保持单一职责，也使缓存命中与未命中两条路径复用同一段包装逻辑。
+    fn wrap_init_process(&self, raw: WslcProcess) -> WslcProcessHandle {
         let stream_state = self
             .inner
             .init_stream_state
@@ -338,11 +381,7 @@ impl WslcContainerHandle {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
 
-        Ok(WslcProcessHandle::from_borrowed(
-            raw_process,
-            self.clone(),
-            stream_state,
-        ))
+        WslcProcessHandle::from_borrowed(raw, self.clone(), stream_state)
     }
 
     /// 为容器 init 主进程注册流式标准 IO 回调 (标准输出与标准错误)

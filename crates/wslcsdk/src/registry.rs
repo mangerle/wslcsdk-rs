@@ -26,12 +26,34 @@ use wslcsdk_sys::types::WslcIdentityTokenType;
 use wslcsdk_sys::*;
 
 /// 仓库鉴权认证结果
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// 刻意**不派生 `Debug`**，改为手工实现并对 `identity_token` 脱敏。
+/// 该令牌是可直接用于拉取私有镜像的 Bearer 凭证，敏感级别等同于密码；
+/// 若沿用派生实现，任何 `{:?}` 格式化都会把它明文写出——包括
+/// `unwrap()` 的 panic 消息、`Result` 的错误链，以及调用方随手写的
+/// 调试日志。派生属编译期展开、无运行时代码，clippy 等 lint 无法检出。
+///
+/// 对照：本库 `CrashDumpSubscription` 亦手工实现了 `Debug` 并刻意
+/// 不打印上下文指针数值（避免泄漏堆地址），可见「`Debug` 须防泄漏」
+/// 的防护意识已确立，此处只是漏掉。
+#[derive(Clone, PartialEq, Eq)]
 pub struct AuthTokenResult {
     /// 身份令牌本身
+    ///
+    /// 属敏感凭证：不要写入日志，持久化前请评估其有效期与泄漏后果。
     pub identity_token: String,
     /// 令牌的类型，决定其后续使用方式
     pub token_type: WslcIdentityTokenType,
+}
+
+impl std::fmt::Debug for AuthTokenResult {
+    /// 令牌字段固定输出 `[已脱敏]`，令牌类型如常打印
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthTokenResult")
+            .field("identity_token", &"[已脱敏]")
+            .field("token_type", &self.token_type)
+            .finish()
+    }
 }
 
 /// 镜像仓库管理器
@@ -521,5 +543,38 @@ mod tests {
         // 非 ASCII 亦不在白名单内（如中文、中文标点、全角字符）
         assert!(validate_mirror_address("evil.com/镜像").is_err());
         assert!(validate_mirror_address("evil.com/日本").is_err());
+    }
+
+    /// 回归：`Debug` 输出不得包含令牌明文
+    ///
+    /// 缺陷成因：本类型曾`#[derive(Debug, ..)]`，而 `identity_token`
+    /// 是可直接用于拉取私有镜像的 Bearer 凭证，敏感级别等同密码。
+    /// 派生实现会被任何 `{:?}` 格式化调用——包括 `unwrap()` 的 panic
+    /// 消息、`Result` 错误链与随手写的调试日志——从而明文外泄，
+    /// 违反 `AGENTS.md` §5「严禁在任何日志输出中打印明文Token」。
+    ///
+    /// 该缺陷无法由 clippy检出：`derive` 是编译期展开，不产生可分析的
+    /// 运行时代码，只能由本用例锁定。
+    #[test]
+    fn test_debug_output_redacts_identity_token() {
+        let result = AuthTokenResult {
+            identity_token: "dG9rZW4tc2VjcmV0LXZhbHVl".to_string(),
+            token_type: WslcIdentityTokenType::Unknown,
+        };
+        let debug = format!("{result:?}");
+
+        assert!(
+            !debug.contains("dG9rZW4tc2VjcmV0LXZhbHVl"),
+            "Debug 输出绝不得包含令牌明文，实际为: {debug}"
+        );
+        assert!(
+            debug.contains("[已脱敏]"),
+            "令牌位置应以脱敏占位符呈现，实际为: {debug}"
+        );
+        // 令牌类型不敏感，应照常打印以便排查问题
+        assert!(
+            debug.contains("token_type"),
+            "令牌类型应保留在 Debug 输出中，实际为: {debug}"
+        );
     }
 }

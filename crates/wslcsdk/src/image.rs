@@ -188,6 +188,11 @@ impl WslcImageManager {
     }
 
     /// 拉取远程镜像
+    ///
+    /// `uri` 会先经 [`resolve_image_reference`](crate::registry::resolve_image_reference)
+    /// 应用环境变量配置的镜像加速器，再交给官方拉取。
+    /// [`push_image`](Self::push_image) 则**不**做此重写，
+    /// 理由见 [`push_image_with_progress`](Self::push_image_with_progress)。
     pub fn pull_image<F>(
         session: &WslcSessionHandle,
         uri: &str,
@@ -396,6 +401,22 @@ impl WslcImageManager {
     }
 
     /// 推送镜像至远程仓库 (支持进度监控)
+    ///
+    /// # 与镜像加速器的差异（有意为之）
+    ///
+    /// 本方法**不**应用 [`resolve_image_reference`](crate::registry::resolve_image_reference)
+    /// 的镜像加速器重写，而 [`pull_image`](Self::pull_image) 会应用。
+    /// 这一不对称是刻意的设计，理由有二：
+    ///
+    /// 1. **镜像加速器本质是拉取侧的优化**。其用途是在网络受限环境中
+    ///    从就近副本拉取，用以加速*读取*；推送是写操作，目标仓库应由
+    ///    调用方显式指定，不应被一个为读取设计的配置悄悄改写。
+    /// 2. **避免推错仓库**。若推送也走重写，从加速器地址拉来的镜像会被
+    ///    推回加速器地址而非原始仓库，而调用方以为自己在推
+    ///    `docker.io/library/alpine`。这类错误不会报错，只会成功推送到
+    ///    一个错误的地点。
+    ///
+    /// 故推送目标恒为调用方给出的 `image` 原值。
     pub fn push_image_with_progress<F>(
         session: &WslcSessionHandle,
         image: &str,
@@ -449,6 +470,10 @@ impl WslcImageManager {
     }
 
     /// 推送镜像至远程仓库
+    ///
+    /// 推送目标为 `image` 原值，**不**应用镜像加速器重写——
+    /// 理由见 [`push_image_with_progress`](Self::push_image_with_progress)
+    /// 的说明。
     pub fn push_image(
         session: &WslcSessionHandle,
         image: &str,

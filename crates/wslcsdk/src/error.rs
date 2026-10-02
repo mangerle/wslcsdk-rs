@@ -214,7 +214,9 @@ impl WslcError {
     pub fn from_hresult(hr: HRESULT, context_desc: impl Into<String>) -> Self {
         let message = context_desc.into();
 
-        if let Some(domain) = WslcDomainError::from_hresult(hr, message.clone()) {
+        // 以借用传入：from_hresult 仅在命中官方业务码时才调用 Into::into，
+        // 非业务码（占绝大多数）因此不必为一次必定落空的分支克隆上下文字符串
+        if let Some(domain) = WslcDomainError::from_hresult(hr, message.as_str()) {
             return Self::Domain(domain);
         }
 

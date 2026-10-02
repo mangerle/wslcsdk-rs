@@ -45,7 +45,9 @@ jobs:
           components: clippy
 
       - name: 运行 Clippy 零警告门禁
-        run: cargo clippy --all-targets -- -D warnings
+        # 显式指定 --workspace：否则新增 crate 时可能只检查到默认成员，
+        # 使新 crate 游离于门禁之外
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   test-x64:
     name: 功能与回归测试 (x86_64-pc-windows-msvc)
@@ -60,7 +62,12 @@ jobs:
           targets: x86_64-pc-windows-msvc
 
       - name: 执行全量测试用例
-        run: cargo test --all-targets
+        run: cargo test --workspace --all-targets
+
+      - name: 校验文档测试与示例可编译
+        run: |
+          cargo test --workspace --doc
+          cargo build --workspace --examples
 
   check-arm64:
     name: 架构链接检查 (aarch64-pc-windows-msvc)
@@ -76,6 +83,49 @@ jobs:
 
       - name: 检查 ARM64 编译完整性
         run: cargo check --target aarch64-pc-windows-msvc --all-targets
+
+      - name: 链接 ARM64 测试与示例
+        # 仅 check 不产生目标文件，无法发现链接期问题。build.rs 会按架构选择
+        # 不同的 .lib 与/DELAYLOAD 链接参数，须确认 ARM64 产物确实能链接成功。
+        run: cargo build --target aarch64-pc-windows-msvc --all-targets
+
+  package:
+    name: 打包内容校验 (cargo package)
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 校验两个 crate 均可打包
+        # include 字段若遗漏 native/ 下的 DLL 与 .lib，发布后下游将无法链接。
+        # 该问题在本地编译阶段完全不可见，只能由打包校验暴露。
+        run: |
+          cargo package -p wslcsdk-sys --allow-dirty
+          cargo package -p wslcsdk --allow-dirty
+
+      - name: 核对原生二进制与头文件已包含
+        run: |
+          $crate = Get-ChildItem target/package/wslcsdk-sys-*.crate | Select-Object -First 1
+          tar tzf $crate.FullName | Out-String | Write-Output
+          $entries = tar tzf $crate.FullName
+          $required = @(
+            'native/include/wslcsdk.h',
+            'native/lib/x64/wslcsdk.dll',
+            'native/lib/x64/wslcsdk.lib',
+            'native/lib/arm64/wslcsdk.dll',
+            'native/lib/arm64/wslcsdk.lib'
+          )
+          $missing = $required | Where-Object {
+            -not ($entries | Where-Object { $_ -like "*$_" })
+          }
+          if ($missing) {
+            Write-Error "打包内容缺失必需文件: $($missing -join ', ')"
+            exit 1
+          }
+          Write-Output "全部 $($required.Count) 个原生文件均已包含"
 
   docs:
     name: 文档仿真构建检查 (cargo doc)

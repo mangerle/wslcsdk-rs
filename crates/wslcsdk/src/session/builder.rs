@@ -274,23 +274,31 @@ impl SessionBuilder {
         let raw_session = self.create_raw_session(&mut settings)?;
         log::info!("WSLC 会话创建成功，会话名称: '{}'", self.name);
 
-        let mta = match HandleMtaLease::acquire() {
-            Ok(lease) => lease,
-            Err(e) => {
-                // SAFETY: raw_session 由本次 WslcCreateSession 成功返回且已判空，
-                // 错误路径下由本处负责回收。
-                unsafe {
-                    let _ = WslcReleaseSession(raw_session);
-                }
-                return Err(e);
-            }
-        };
+        Self::wrap_created_session(raw_session, self.name)
+    }
 
-        Ok(WslcSessionHandle::from_acquired_lease(
-            raw_session,
-            self.name,
-            mta,
-        ))
+    /// 为已创建的裸会话句柄取得租约并构造 RAII 包装，失败时回收裸句柄
+    ///
+    /// 独立成方法而非内联于 [`build`](Self::build)，是为了让「租约必须在
+    /// 句柄构造**之前**取得」这一顺序约束在代码结构上可见：若把
+    /// `acquire()?` 写进结构体字面量，租约获取失败时 `?` 会提前返回，
+    /// 而 `raw` 已由官方成功创建却无人接管，`WslcReleaseSession` 永不
+    /// 执行，句柄泄漏。
+    fn wrap_created_session(
+        raw: WslcSession,
+        name: String,
+    ) -> Result<WslcSessionHandle, WslcError> {
+        match HandleMtaLease::acquire() {
+            Ok(mta) => Ok(WslcSessionHandle::from_acquired_lease(raw, name, mta)),
+            Err(e) => {
+                // SAFETY: raw 由本次 WslcCreateSession 成功返回且已判空，
+                // 错误路径下由本处负责回收，不会重复释放。
+                unsafe {
+                    let _ = WslcReleaseSession(raw);
+                }
+                Err(e)
+            }
+        }
     }
 }
 

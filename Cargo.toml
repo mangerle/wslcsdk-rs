@@ -14,6 +14,9 @@ repository = "https://github.com/mangerle/wslcsdk-rs"
 homepage = "https://github.com/mangerle/wslcsdk-rs"
 readme = "README.md"
 
+[workspace.lints.rust]
+unused_qualifications = "warn"
+
 [workspace.dependencies]
 # 内部成员关联
 wslcsdk-sys = { version = "=3.0.1", path = "crates/wslcsdk-sys" }
@@ -24,7 +27,12 @@ thiserror = "2.0"
 log = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1", features = ["sync", "io-util", "rt", "time"] }
+#特性按实际使用面精确收敛，刻意不启用 io-util（本库不暴露任何
+# AsyncRead/AsyncWrite 接口）与 macros（仅示例与测试需要，已由
+# wslcsdk 的 dev-dependencies 提供，无需传递给库的使用者）
+tokio = { version = "1", features = ["sync", "rt", "time"] }
+# 流式回调上下文注册表：内建并发安全与轻量 Clone，无需外层包裹 Arc
+dashmap = "6.2"
 
 [profile.release]
 opt-level = 3

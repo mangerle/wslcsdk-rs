@@ -14,9 +14,13 @@ keywords = ["wsl", "wslc", "wslcsdk", "container", "virtualization"]
 categories = ["virtualization", "os::windows-apis", "api-bindings"]
 include = [
     "src/**/*",
+    "examples/**/*",
     "Cargo.toml",
     "README.md",
 ]
+
+[lints]
+workspace = true
 
 [dependencies]
 wslcsdk-sys = { workspace = true }
@@ -25,14 +29,21 @@ log = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+dashmap = { workspace = true }
+
+[dev-dependencies]
+# 示例与测试需要多线程运行时及 #[tokio::main] 宏；仅作用于本 crate 的示例与测试，
+# 不会向库的使用者传递该特性
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_System_Com",
     "Win32_System_Threading",
-    "Win32_Security",
+    "Win32_Security", # CreateEventW 依赖 SECURITY_ATTRIBUTES
     "Win32_System_LibraryLoader",
+    "Win32_Networking_WinSock",
 ] }
 
 [package.metadata.docs.rs]

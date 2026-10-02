@@ -245,14 +245,10 @@ fn test_bound_builder_needs_no_session_argument() {
 }
 
 /// 清理指定名称测试会话在宿主机文件系统上留下的存储目录
+///
+/// 根目录直接取自库公开的 `wslcsdk::default_session_root`，不在此复刻
+/// 环境变量降级链——两处各写一份时，任何一方的调整都会让清理逻辑指向
+/// 与创建逻辑不同的目录，残留目录便再也删不掉。
 fn cleanup_session_dir(name: &str) {
-    let base_dir = std::env::var("LOCALAPPDATA")
-        .map(|p| std::path::PathBuf::from(p).join("wslc"))
-        .unwrap_or_else(|_| {
-            std::env::var("USERPROFILE")
-                .map(|p| std::path::PathBuf::from(p).join(".wslc"))
-                .unwrap_or_else(|_| std::path::PathBuf::from(r"C:\wslc"))
-        });
-    let path = base_dir.join("sessions").join(name);
-    let _ = std::fs::remove_dir_all(path);
+    let _ = std::fs::remove_dir_all(wslcsdk::default_session_root().join(name));
 }

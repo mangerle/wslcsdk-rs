@@ -10,7 +10,7 @@
 mod builder;
 mod handle;
 
-pub use builder::{SessionBuilder, VhdRequirementsData};
+pub use builder::{SessionBuilder, VhdRequirementsData, default_session_root};
 // 路径转换辅助为 crate 内部工具，供容器与镜像模块复用，不参与公开 API 面
 pub(crate) use builder::path_to_wide_null;
 pub use handle::{CrashDumpSubscription, WslcSessionHandle};

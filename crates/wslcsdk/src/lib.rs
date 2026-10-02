@@ -75,7 +75,7 @@ pub use process::{ProcessBuilder, ProcessStreams, WslcProcessHandle};
 #[cfg(windows)]
 pub use registry::{AuthTokenResult, WslcRegistryManager};
 #[cfg(windows)]
-pub use session::{CrashDumpSubscription, SessionBuilder, WslcSessionHandle};
+pub use session::{CrashDumpSubscription, SessionBuilder, WslcSessionHandle, default_session_root};
 #[cfg(windows)]
 pub use system::WslcSystem;
 #[cfg(windows)]

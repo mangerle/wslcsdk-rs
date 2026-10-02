@@ -62,14 +62,15 @@ pub struct SessionBuilder {
     feature_flags: WslcSessionFeatureFlags,
 }
 
-/// 解析会话的默认存储路径（不产生任何文件系统副作用）
+/// 会话默认存储根目录（不产生任何文件系统副作用）
 ///
-/// 优先取 `%LOCALAPPDATA%\wslc\sessions\<name>`；该变量缺失时降级为
-/// `%USERPROFILE%\.wslc\sessions\<name>`；两者皆缺失时兜底到 `C:\wslc`。
+/// 优先取 `%LOCALAPPDATA%\wslc\sessions`；该变量缺失时降级为
+/// `%USERPROFILE%\.wslc\sessions`；两者皆缺失时兜底到 `C:\wslc\sessions`。
 ///
-/// 抽为独立纯函数后，路径拼接逻辑得以被单元测试直接覆盖，而不必真的在
-/// 开发机上创建目录。
-pub(crate) fn default_storage_path(name: &str) -> PathBuf {
+/// 对外暴露的意义在于：调用方在清理、备份或排查残留会话时需要知道这套
+/// 降级规则的结果，自行另写一遍极易与之失同步（本仓库的集成测试就曾
+/// 完整复制过这段逻辑）。
+pub fn default_session_root() -> PathBuf {
     let base_dir = std::env::var("LOCALAPPDATA")
         .map(|p| PathBuf::from(p).join("wslc"))
         .unwrap_or_else(|_| {
@@ -77,7 +78,15 @@ pub(crate) fn default_storage_path(name: &str) -> PathBuf {
                 .map(|p| PathBuf::from(p).join(".wslc"))
                 .unwrap_or_else(|_| PathBuf::from(r"C:\wslc"))
         });
-    base_dir.join("sessions").join(name)
+    base_dir.join("sessions")
+}
+
+/// 解析会话的默认存储路径（不产生任何文件系统副作用）
+///
+/// 抽为独立纯函数后，路径拼接逻辑得以被单元测试直接覆盖，而不必真的在
+/// 开发机上创建目录。
+pub(crate) fn default_storage_path(name: &str) -> PathBuf {
+    default_session_root().join(name)
 }
 
 impl SessionBuilder {

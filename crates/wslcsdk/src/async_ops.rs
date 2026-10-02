@@ -1,21 +1,202 @@
-﻿//! 面向 Tokio 运行时的异步非阻塞扩展
+//! 面向 Tokio 运行时的异步非阻塞扩展
 //!
-//! 将长耗时的会话初始化、镜像下载拉取、容器控制与状态检查安全卸载到
-//! `tokio::task::spawn_blocking` 阻塞线程池中执行，并在闭包内自动注入 COM MTA 环境，
-//! 彻底避免占用 Tokio 异步运行时工作线程导致的界面卡顿与线程饥饿。
+//! 包含基于 Windows 原生线程池 `RegisterWaitForSingleObject` 的零轮询事件驱动等待机制，
+//! 以及将密集型文件/镜像与容器管理安全卸载至阻塞线程池的异步方法扩展。
+//!
+//! # 取消语义
+//!
+//! 本模块的阻塞类异步方法均基于 [`tokio::task::spawn_blocking`]。该任务一经派发便
+//! **无法被取消**：即便调用方在 `select!` 中超时放弃等待，底层的 WSLC 调用
+//! （如镜像拉取、容器启动）仍会在阻塞线程池中执行到底，并持续持有其参数中的
+//! 会话或容器句柄克隆。
+//!
+//! 因此超时返回**不代表操作已被撤销**。若业务需要真正的中止语义，请改用本库提供的
+//! 同步接口自行配合超时与取消令牌，或在 SDK 层面确认对应操作是否可中断。
 
+use crate::channel::AsyncReceiver;
 use crate::container::{ContainerBuilder, WslcContainerHandle};
 use crate::error::WslcError;
-use crate::image::{ImageInfo, WslcImageManager};
+use crate::image::{ImageInfo, OwnedImageProgress, WslcImageManager};
 use crate::session::{SessionBuilder, WslcSessionHandle};
+use core::ffi::c_void;
+use std::future::Future;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use tokio::sync::{mpsc, oneshot};
+use windows_sys::Win32::Foundation::{BOOLEAN, GetLastError, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::System::Threading::{
+    RegisterWaitForSingleObject, UnregisterWaitEx, WT_EXECUTEONLYONCE,
+};
 use wslcsdk_sys::types::WslcSignal;
+
+// ==================== 方案 B: Win32 线程池事件驱动等待 ====================
+
+struct EventWaitShared {
+    sender: Mutex<Option<oneshot::Sender<bool>>>,
+    wait_handle: std::sync::atomic::AtomicPtr<c_void>,
+    is_done: AtomicBool,
+}
+
+unsafe extern "system" fn win32_wait_callback(context: *mut c_void, timer_or_wait_fired: BOOLEAN) {
+    if context.is_null() {
+        return;
+    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: 该指针由 Arc::into_raw 从同一 Arc 拆出，引用计数所有权
+        // 随之转移；此处按对应路径恰好重建一次，未发生重复释放。
+        let shared = unsafe { Arc::from_raw(context as *const EventWaitShared) };
+        let is_signaled = timer_or_wait_fired == 0;
+        shared.is_done.store(true, Ordering::Release);
+        if let Ok(mut lock) = shared.sender.lock()
+            && let Some(tx) = lock.take()
+        {
+            let _ = tx.send(is_signaled);
+        }
+    }));
+}
+
+struct WaitGuard {
+    shared: Arc<EventWaitShared>,
+    wait_handle: HANDLE,
+    raw_ctx: *mut EventWaitShared,
+}
+
+impl Drop for WaitGuard {
+    fn drop(&mut self) {
+        if let Ok(mut lock) = self.shared.sender.lock() {
+            let _ = lock.take();
+        }
+        if !self.wait_handle.is_null() {
+            if self.shared.is_done.load(Ordering::Acquire) {
+                // 回调已完成，此时使用 INVALID_HANDLE_VALUE 瞬间注销并清理句柄，零等待
+                // SAFETY: 句柄来自同一次成功的 RegisterWaitForSingleObject 且未被注销过；
+                // 注销与所有权回收的配对关系由返回值分支判定保证。
+                unsafe {
+                    let _ = UnregisterWaitEx(self.wait_handle, INVALID_HANDLE_VALUE);
+                }
+            } else {
+                // 回调尚未完成，传入 NULL 立即返回，杜绝阻塞当前 Tokio 工作线程
+                let success =
+                    // SAFETY: 句柄来自同一次成功的 RegisterWaitForSingleObject 且未被注销过；
+                    // 注销与所有权回收的配对关系由返回值分支判定保证。
+                    unsafe { UnregisterWaitEx(self.wait_handle, std::ptr::null_mut()) };
+                if success != 0 {
+                    // 成功取消等待且回调承诺不会执行，严格对偶回收由 into_raw 分配的 Arc 所有权
+                    // SAFETY: 该指针由 Arc::into_raw 从同一 Arc 拆出，引用计数所有权
+                    // 随之转移；此处按对应路径恰好重建一次，未发生重复释放。
+                    let _ = unsafe { Arc::from_raw(self.raw_ctx) };
+                }
+                // 若返回 0，表明回调已并发调度并执行，所有权交由回调中的 Arc::from_raw 释放
+            }
+            self.wait_handle = std::ptr::null_mut();
+        }
+    }
+}
+
+/// 注册 Win32 线程池等待事件，失败时安全回收裸指针所有权并返回 HRESULT 错误
+fn register_win32_wait(
+    event: HANDLE,
+    raw_ctx: *mut EventWaitShared,
+    timeout_ms: u32,
+) -> Result<HANDLE, WslcError> {
+    let mut wait_handle: HANDLE = std::ptr::null_mut();
+    // SAFETY: 事件句柄由官方 SDK 托管且生命周期覆盖本次等待；上下文指针为有效
+    // Arc 拆出的裸指针。注册失败（返回 0）时下方分支立即回收其所有权。
+    let success = unsafe {
+        RegisterWaitForSingleObject(
+            &mut wait_handle,
+            event,
+            Some(win32_wait_callback),
+            raw_ctx as *mut c_void,
+            timeout_ms,
+            WT_EXECUTEONLYONCE,
+        )
+    };
+
+    if success == 0 {
+        // SAFETY: 该指针由 Arc::into_raw 从同一 Arc 拆出，引用计数所有权
+        // 随之转移；此处按对应路径恰好重建一次，未发生重复释放。
+        let _ = unsafe { Arc::from_raw(raw_ctx) };
+        // SAFETY: 无参数无副作用，仅紧随失败的 Win32 调用读取错误码。
+        let err = unsafe { GetLastError() };
+        return Err(WslcError::Hresult(
+            err,
+            "注册 Win32 线程池等待事件失败".to_string(),
+        ));
+    }
+
+    Ok(wait_handle)
+}
+
+/// 基于 Windows 线程池的非轮询异步事件等待 (真正 0 CPU、0 协程切片搅动，具备 Tokio 取消安全性)
+pub(crate) async fn wait_win32_event_async(
+    event: HANDLE,
+    timeout_ms: u32,
+) -> Result<bool, WslcError> {
+    if event.is_null() {
+        return Err(WslcError::InvalidHandle);
+    }
+
+    let (tx, rx) = oneshot::channel();
+    let shared = Arc::new(EventWaitShared {
+        sender: Mutex::new(Some(tx)),
+        wait_handle: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+        is_done: AtomicBool::new(false),
+    });
+
+    let raw_ctx = Arc::into_raw(shared.clone()) as *mut EventWaitShared;
+    let wait_handle = register_win32_wait(event, raw_ctx, timeout_ms)?;
+
+    shared.wait_handle.store(wait_handle, Ordering::Release);
+
+    let guard = WaitGuard {
+        shared: shared.clone(),
+        wait_handle,
+        raw_ctx,
+    };
+
+    let result = rx
+        .await
+        .map_err(|_| WslcError::ChannelTerminated("Win32 事件等待通知通道".to_string()))?;
+
+    drop(guard);
+    Ok(result)
+}
+
+// ==================== 阻塞任务调度辅助 ====================
+
+/// 将同步的 WSLC 调用卸载至阻塞线程池执行
+///
+/// 统一承担三件事：
+/// 1. 把可能长时间阻塞的 SDK 调用移出 Tokio 工作线程，避免拖累整个调度器；
+/// 2. 收敛 `JoinError` 到 [`WslcError::TaskJoin`] 的转换，并附带具体操作名称；
+/// 3. 抹平各调用点重复的样板代码。
+///
+/// 被调用的同步接口自身已负责建立线程级 COM MTA 上下文（见
+/// [`try_initialize_mta`](crate::try_initialize_mta)），故此处不再重复包裹 `with_mta`：
+/// 那会在同一次调用中初始化两次 MTA 并吞掉 STA 降级信息，徒增调用链深度而无收益。
+///
+/// # 取消语义
+///
+/// [`tokio::task::spawn_blocking`] 派发的任务**无法被取消**。调用方超时或放弃等待时，
+/// 底层调用仍会执行到底，本方法不提供中止能力。
+async fn run_blocking<F, R>(operation: &str, task: F) -> Result<R, WslcError>
+where
+    F: FnOnce() -> Result<R, WslcError> + Send + 'static,
+    R: Send + 'static,
+{
+    tokio::task::spawn_blocking(task)
+        .await
+        .map_err(|e| WslcError::TaskJoin(format!("{operation}失败: {e}")))?
+}
+
+// ==================== 会话异步扩展 ====================
 
 impl SessionBuilder {
     /// 异步创建并激活会话 (防止阻塞 Tokio 工作线程)
     pub async fn build_async(self) -> Result<WslcSessionHandle, WslcError> {
-        tokio::task::spawn_blocking(move || crate::com::with_mta(|| self.build()))
-            .await
-            .map_err(|e| WslcError::TaskJoin(format!("异步任务执行失败: {e}")))?
+        run_blocking("异步创建会话", move || self.build()).await
     }
 }
 
@@ -26,9 +207,7 @@ impl ContainerBuilder {
         session: &WslcSessionHandle,
     ) -> Result<WslcContainerHandle, WslcError> {
         let session = session.clone();
-        tokio::task::spawn_blocking(move || crate::com::with_mta(|| self.build(&session)))
-            .await
-            .map_err(|e| WslcError::TaskJoin(format!("异步创建容器任务失败: {e}")))?
+        run_blocking("异步创建容器", move || self.build(&session)).await
     }
 }
 
@@ -36,60 +215,140 @@ impl WslcSessionHandle {
     /// 异步获取会话内的镜像列表
     pub async fn list_images_async(&self) -> Result<Vec<ImageInfo>, WslcError> {
         let session = self.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::com::with_mta(|| WslcImageManager::list_images(&session))
+        run_blocking("异步获取镜像列表", move || {
+            WslcImageManager::list_images(&session)
         })
         .await
-        .map_err(|e| WslcError::TaskJoin(format!("异步获取镜像列表失败: {e}")))?
+    }
+
+    /// 异步拉取远程镜像并支持订阅进度
+    ///
+    /// 返回的进度接收端与拉取任务共享同一个有界通道：若消费端跟不上，
+    /// 通道会按背压策略丢弃进度消息（丢弃量由 `AsyncReceiver` 侧统计），
+    /// 拉取本身则继续进行。
+    pub fn pull_image_with_progress_async(
+        &self,
+        uri: String,
+        registry_auth: Option<String>,
+        progress_capacity: usize,
+    ) -> (
+        impl Future<Output = Result<(), WslcError>> + Send + 'static,
+        AsyncReceiver<OwnedImageProgress>,
+    ) {
+        let (tx, rx) = mpsc::channel(progress_capacity.max(1));
+        let dropped_counter = Arc::new(AtomicU64::new(0));
+        let drop_counter_clone = Arc::clone(&dropped_counter);
+        let session = self.clone();
+        let fut = async move {
+            run_blocking("异步拉取镜像", move || {
+                WslcImageManager::pull_image(
+                    &session,
+                    &uri,
+                    registry_auth.as_deref(),
+                    Some(move |p: &crate::image::ImageProgress<'_>| {
+                        let owned = p.to_owned();
+                        if tx.try_send(owned).is_err() {
+                            drop_counter_clone.fetch_add(1, Ordering::Relaxed);
+                        }
+                        true
+                    }),
+                )
+            })
+            .await
+        };
+        (
+            fut,
+            AsyncReceiver::new_with_drop_counter(rx, dropped_counter),
+        )
     }
 
     /// 异步拉取远程镜像
+    ///
+    /// # 取消语义
+    ///
+    /// 底层拉取一经开始便无法中断：本方法超时返回时，SDK 侧的拉取动作
+    /// 仍会在阻塞线程池中继续执行，并持续持有会话句柄克隆。
     pub async fn pull_image_async(
         &self,
         uri: String,
         registry_auth: Option<String>,
     ) -> Result<(), WslcError> {
+        let (fut, _) = self.pull_image_with_progress_async(uri, registry_auth, 1);
+        fut.await
+    }
+
+    /// 异步推送镜像至远程仓库
+    pub async fn push_image_async(
+        &self,
+        image: String,
+        registry_auth: Option<String>,
+    ) -> Result<(), WslcError> {
         let session = self.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::com::with_mta(|| {
-                WslcImageManager::pull_image(
-                    &session,
-                    &uri,
-                    registry_auth.as_deref(),
-                    None::<fn(&crate::image::ImageProgress<'_>) -> bool>,
-                )
-            })
+        run_blocking("异步推送镜像", move || {
+            WslcImageManager::push_image(&session, &image, registry_auth.as_deref())
         })
         .await
-        .map_err(|e| WslcError::TaskJoin(format!("异步拉取镜像失败: {e}")))?
+    }
+
+    /// 异步从文件导入 tar 镜像
+    pub async fn import_image_from_file_async(
+        &self,
+        image_name: String,
+        path: PathBuf,
+    ) -> Result<(), WslcError> {
+        let session = self.clone();
+        run_blocking("异步导入镜像文件", move || {
+            WslcImageManager::import_image_from_file(&session, &image_name, path)
+        })
+        .await
+    }
+
+    /// 异步从文件载入 docker save 镜像
+    pub async fn load_image_from_file_async(&self, path: PathBuf) -> Result<(), WslcError> {
+        let session = self.clone();
+        run_blocking("异步载入镜像文件", move || {
+            WslcImageManager::load_image_from_file(&session, path)
+        })
+        .await
+    }
+
+    /// 异步为已有镜像打标签
+    pub async fn tag_image_async(
+        &self,
+        image: String,
+        repo: String,
+        tag: String,
+    ) -> Result<(), WslcError> {
+        let session = self.clone();
+        run_blocking("异步镜像打标签", move || {
+            WslcImageManager::tag_image(&session, &image, &repo, &tag)
+        })
+        .await
     }
 
     /// 异步删除镜像
     pub async fn delete_image_async(&self, name_or_id: String) -> Result<(), WslcError> {
         let session = self.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::com::with_mta(|| WslcImageManager::delete_image(&session, &name_or_id))
+        run_blocking("异步删除镜像", move || {
+            WslcImageManager::delete_image(&session, &name_or_id)
         })
         .await
-        .map_err(|e| WslcError::TaskJoin(format!("异步删除镜像失败: {e}")))?
     }
 
     /// 异步终止会话
     pub async fn terminate_async(&self) -> Result<(), WslcError> {
         let session = self.clone();
-        tokio::task::spawn_blocking(move || crate::com::with_mta(|| session.terminate()))
-            .await
-            .map_err(|e| WslcError::TaskJoin(format!("异步终止会话失败: {e}")))?
+        run_blocking("异步终止会话", move || session.terminate()).await
     }
 }
+
+// ==================== 容器异步扩展 ====================
 
 impl WslcContainerHandle {
     /// 异步启动容器
     pub async fn start_async(&self, attach: bool) -> Result<(), WslcError> {
         let container = self.clone();
-        tokio::task::spawn_blocking(move || crate::com::with_mta(|| container.start(attach)))
-            .await
-            .map_err(|e| WslcError::TaskJoin(format!("异步启动容器失败: {e}")))?
+        run_blocking("异步启动容器", move || container.start(attach)).await
     }
 
     /// 异步停止容器
@@ -99,26 +358,92 @@ impl WslcContainerHandle {
         timeout_seconds: u32,
     ) -> Result<(), WslcError> {
         let container = self.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::com::with_mta(|| container.stop(signal, timeout_seconds))
+        run_blocking("异步停止容器", move || {
+            container.stop(signal, timeout_seconds)
         })
         .await
-        .map_err(|e| WslcError::TaskJoin(format!("异步停止容器失败: {e}")))?
     }
 
     /// 异步删除容器
     pub async fn delete_async(&self, force: bool) -> Result<(), WslcError> {
         let container = self.clone();
-        tokio::task::spawn_blocking(move || crate::com::with_mta(|| container.delete(force)))
-            .await
-            .map_err(|e| WslcError::TaskJoin(format!("异步删除容器失败: {e}")))?
+        run_blocking("异步删除容器", move || container.delete(force)).await
     }
 
     /// 异步获取容器 JSON 检查快照
     pub async fn inspect_async(&self) -> Result<serde_json::Value, WslcError> {
         let container = self.clone();
-        tokio::task::spawn_blocking(move || crate::com::with_mta(|| container.inspect()))
-            .await
-            .map_err(|e| WslcError::TaskJoin(format!("异步检查容器失败: {e}")))?
+        run_blocking("异步检查容器", move || container.inspect()).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows_sys::Win32::System::Threading::{CreateEventW, ResetEvent, SetEvent};
+
+    fn current_thread_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("创建测试用 Tokio 运行时失败")
+    }
+
+    #[test]
+    fn test_event_wait_timeout_signal_and_cancellation() {
+        let rt = current_thread_runtime();
+
+        rt.block_on(async {
+            // 创建一个手动重置、初始未激活的事件
+            // SAFETY: Win32 API 调用，传入的句柄与缓冲区均为栈上有效内存，
+            // 长度参数与实际可读长度一致。
+            let event = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+            assert!(!event.is_null());
+
+            // 1. 超时场景：事件未激活，预期返回 Ok(false)
+            let timeout_res = wait_win32_event_async(event, 30).await;
+            assert!(!timeout_res.expect("等待超时场景不应失败"));
+
+            // 2. 信号唤醒场景：派生任务在 20ms 后触发事件
+            let ev_clone = event as usize;
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                // SAFETY: 句柄由本测试经 CreateEventW 自行创建并在同作用域释放，
+                // 不属于 SDK 托管资源。
+                unsafe {
+                    SetEvent(ev_clone as _);
+                }
+            });
+            let signal_res = wait_win32_event_async(event, 1000).await;
+            assert!(signal_res.expect("等待信号场景不应失败"));
+
+            // 3. 取消安全性：Future 被 select! 中断后不得执行到完成分支
+            // SAFETY: 句柄由本测试经 CreateEventW 自行创建并在同作用域释放，
+            // 不属于 SDK 托管资源。
+            unsafe {
+                ResetEvent(event);
+            }
+            tokio::select! {
+                _ = wait_win32_event_async(event, 5000) => {
+                    panic!("等待不应在超时前完成");
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+            }
+
+            // SAFETY: 句柄由本测试经 CreateEventW 自行创建并在同作用域释放，
+            // 不属于 SDK 托管资源。
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(event);
+            }
+        });
+    }
+
+    #[test]
+    fn test_null_event_is_rejected() {
+        let rt = current_thread_runtime();
+        rt.block_on(async {
+            let res = wait_win32_event_async(std::ptr::null_mut(), 10).await;
+            assert_eq!(res.unwrap_err(), WslcError::InvalidHandle);
+        });
     }
 }

@@ -153,8 +153,10 @@ impl WslcImageManager {
         // 数组所有权移交 ComArray：空指针与 count 为 0 两种情形均被自动收敛，
         // 无论后续如何提前返回，COM 堆内存都会被恰好释放一次
         // SAFETY: raw_images 为官方 _Outptr_result_buffer_ 输出数组，所有权移交本侧
-        let images = unsafe { ComArray::from_raw(raw_images, count as usize) }
-            .expect("非空长度下的官方输出数组不应构造失败");
+        let images =
+            unsafe { ComArray::from_raw(raw_images, count as usize) }.ok_or_else(|| {
+                WslcError::UnexpectedSdkResult("WslcListSessionImages 未返回镜像数组".to_string())
+            })?;
 
         let slice = images.as_slice();
         if slice.is_empty() {

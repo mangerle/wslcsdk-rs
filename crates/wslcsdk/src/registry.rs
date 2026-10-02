@@ -130,8 +130,11 @@ impl WslcRegistryManager {
         }
 
         // SAFETY: token_ptr 为官方 _Outptr_result_z_ 输出参数，所有权移交本侧
-        let token = unsafe { ComAnsiString::from_raw(token_ptr) }
-            .expect("前序空指针检查已保证令牌指针非空");
+        let token = unsafe { ComAnsiString::from_raw(token_ptr) }.ok_or_else(|| {
+            WslcError::UnexpectedSdkResult(
+                "WslcSessionAuthenticate 返回成功状态却未给出令牌字符串".to_string(),
+            )
+        })?;
 
         Ok(AuthTokenResult {
             identity_token: token

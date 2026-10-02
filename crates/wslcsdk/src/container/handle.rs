@@ -284,8 +284,11 @@ impl WslcContainerHandle {
         }
 
         // SAFETY: inspect_ptr 为官方 _Outptr_result_z_ 输出参数，所有权移交本侧
-        let json = unsafe { ComAnsiString::from_raw(inspect_ptr) }
-            .expect("前序判定已确保 hr 成功时指针非空");
+        let json = unsafe { ComAnsiString::from_raw(inspect_ptr) }.ok_or_else(|| {
+            WslcError::UnexpectedSdkResult(
+                "WslcInspectContainer 返回成功状态却未给出检查数据指针".to_string(),
+            )
+        })?;
 
         // 显式处理非 UTF-8：静默降级为空串会让 JSON 解析报出「语法错误」，
         // 把问题指向错误的方位，掩盖真正的根因

@@ -72,10 +72,24 @@ unsafe extern "system" fn win32_wait_callback(context: *mut c_void, timer_or_wai
     }));
 }
 
+/// 等待句柄与回调上下文的 RAII 守卫
+///
+/// # 为何两个指针字段都以 `usize` 而非原生指针类型承载
+///
+/// 本守卫在 `rx.await` 期间**跨挂起点存活**，故其字段类型直接决定整个
+/// future 是否为 `Send`。而 `HANDLE` 与 `*mut EventWaitShared` 都是裸指针，
+/// 二者会让 `wait_win32_event_async` 的 future 失去 `Send`——调用方因此
+/// 无法 `tokio::spawn` 它，也无法在多线程运行时上跨 `select!` 组合。
+///
+/// 改为整数承载后，字段本身是 `Send`，future 随之可用。这与本库
+/// `process/stream.rs` 中「回调上下文以整数而非裸指针承载」的既有做法
+/// 一致。回收时按原类型 cast 回即可，`debug_assert` 守护同源关系。
 struct WaitGuard {
     shared: Arc<EventWaitShared>,
-    wait_handle: HANDLE,
-    raw_ctx: *mut EventWaitShared,
+    /// `RegisterWaitForSingleObject` 返回的等待句柄，以整数承载以保持 `Send`
+    wait_handle: usize,
+    /// `Arc::into_raw` 拆出的上下文指针地址，回收时 cast 回 `*const EventWaitShared`
+    raw_ctx: usize,
 }
 
 impl Drop for WaitGuard {
@@ -83,7 +97,11 @@ impl Drop for WaitGuard {
         if let Ok(mut lock) = self.shared.sender.lock() {
             let _ = lock.take();
         }
-        if !self.wait_handle.is_null() {
+        if self.wait_handle != 0 {
+            // SAFETY: 两个整数字段均源自本模块内的同一次构造，
+            // wait_handle 来自成功的 RegisterWaitForSingleObject，
+            // raw_ctx 为 Arc::as_ptr 的取值，cast 回原类型合法。
+            let wait_handle = self.wait_handle as HANDLE;
             if self.shared.is_done.load(Ordering::Acquire) {
                 // 回调已完成（其内的Arc::from_raw 已消费掉本份所有权），
                 // 此处只注销句柄、不再回收裸指针。
@@ -95,13 +113,13 @@ impl Drop for WaitGuard {
                 // 且本类型未实现 Clone、Drop 需独占 &mut self，
                 // 保证句柄至多注销一次。
                 unsafe {
-                    let _ = UnregisterWaitEx(self.wait_handle, INVALID_HANDLE_VALUE);
+                    let _ = UnregisterWaitEx(wait_handle, INVALID_HANDLE_VALUE);
                 }
             } else {
                 // 回调尚未开始，传入 NULL 立即返回，杜绝阻塞当前 Tokio 工作线程
                 let success =
                     // SAFETY: 句柄来源同上，Drop 独占保证至多注销一次。
-                    unsafe { UnregisterWaitEx(self.wait_handle, std::ptr::null_mut()) };
+                    unsafe { UnregisterWaitEx(wait_handle, std::ptr::null_mut()) };
                 if success != 0 {
                     // 成功取消等待，官方承诺回调不会再执行，故由本处
                     // 消费 `Arc::into_raw` 拆出的那一份引用计数。
@@ -111,11 +129,11 @@ impl Drop for WaitGuard {
                     // `win32_wait_callback` 的 SAFETY 注释）。
                     // 返回非零即等价于「官方承诺不再执行回调」，
                     // 故此处回收不会与回调内的 `Arc::from_raw` 重复。
-                    let _ = unsafe { Arc::from_raw(self.raw_ctx) };
+                    let _ = unsafe { Arc::from_raw(self.raw_ctx as *const EventWaitShared) };
                 }
                 // 若返回 0，回调已被并发调度，其内的 Arc::from_raw 负责回收
             }
-            self.wait_handle = std::ptr::null_mut();
+            self.wait_handle = 0;
         }
     }
 }
@@ -156,35 +174,57 @@ fn register_win32_wait(
 }
 
 /// 基于 Windows 线程池的非轮询异步事件等待 (真正 0 CPU、0 协程切片搅动，具备 Tokio 取消安全性)
-pub(crate) async fn wait_win32_event_async(
+///
+/// # 为何写为「返回 impl Future」而非 `async fn`
+///
+/// `HANDLE` 是裸指针。若本函数写作 `async fn`，该参数会被生成器捕获并
+/// 跨 await 存活，使返回的 future 失去 `Send`——调用方因此无法
+/// `tokio::spawn` 它，也无法在多线程运行时上跨 `select!` 组合。
+///
+/// 改为在进入 async 块之前就把裸指针消费干净（注册完毕、守卫以整数承载
+/// 两个地址），async 块内便不再有任何裸指针，future 随之可用。
+pub(crate) fn wait_win32_event_async(
     event: HANDLE,
     timeout_ms: u32,
-) -> Result<bool, WslcError> {
-    if event.is_null() {
-        return Err(WslcError::InvalidHandle);
-    }
-
+) -> impl Future<Output = Result<bool, WslcError>> {
     let (tx, rx) = oneshot::channel();
     let shared = Arc::new(EventWaitShared {
         sender: Mutex::new(Some(tx)),
         is_done: AtomicBool::new(false),
     });
 
-    let raw_ctx = Arc::into_raw(shared.clone()) as *mut EventWaitShared;
-    let wait_handle = register_win32_wait(event, raw_ctx, timeout_ms)?;
-
-    let guard = WaitGuard {
-        shared: shared.clone(),
-        wait_handle,
-        raw_ctx,
+    // ---- 同步段：裸指针仅在此段出现，不进入下方 async 块 ----
+    let prepared = if event.is_null() {
+        Err(WslcError::InvalidHandle)
+    } else {
+        // 拆出一份所有权交给 Win32 回调；其地址同时以整数记入守卫
+        let raw_ctx = Arc::into_raw(shared.clone()) as *mut EventWaitShared;
+        register_win32_wait(event, raw_ctx, timeout_ms).map(|handle| {
+            let guard = WaitGuard {
+                shared: shared.clone(),
+                wait_handle: handle as usize,
+                raw_ctx: raw_ctx as usize,
+            };
+            debug_assert_eq!(
+                guard.raw_ctx,
+                Arc::as_ptr(&guard.shared) as usize,
+                "守卫记录的上下文地址必须与本 Arc 指向同一对象"
+            );
+            guard
+        })
     };
 
-    let result = rx
-        .await
-        .map_err(|_| WslcError::ChannelTerminated("Win32 事件等待通知通道".to_string()))?;
+    async move {
+        // 守卫移入 async 块：即便 future 被丢弃未 poll，其 Drop 仍会注销等待
+        let guard = prepared?;
 
-    drop(guard);
-    Ok(result)
+        let result = rx
+            .await
+            .map_err(|_| WslcError::ChannelTerminated("Win32 事件等待通知通道".to_string()))?;
+
+        drop(guard);
+        Ok(result)
+    }
 }
 
 // ==================== 阻塞任务调度辅助 ====================
@@ -471,6 +511,24 @@ mod tests {
                 windows_sys::Win32::Foundation::CloseHandle(event);
             }
         });
+    }
+
+    /// 等待类 future 必须可用于 `tokio::spawn`
+    ///
+    /// 缺陷成因：`WaitGuard` 曾持有 `HANDLE` 与 `*mut EventWaitShared` 两个
+    /// 裸指针字段，而该守卫跨 `rx.await` 存活，使整个 future 失去 `Send`。
+    /// 这属遗漏而非设计取舍——同文件的 `pull_image_with_progress_async`
+    /// 明确标注了 `+ Send + 'static`，作者有意识地保证了 Send。
+    ///
+    /// 本用例的**编译通过**即是断言：一旦有人把裸指针字段加回来，此处即报
+    /// E0277，无需任何运行时行为即可挡住回归。
+    #[test]
+    fn test_wait_future_is_send() {
+        fn assert_send<T: Send>(_: &T) {}
+        let fut = wait_win32_event_async(std::ptr::null_mut(), 1);
+        assert_send(&fut);
+        // 只验证类型约束，不实际 poll（空句柄会在同步段即返回错误）
+        drop(fut);
     }
 
     #[test]

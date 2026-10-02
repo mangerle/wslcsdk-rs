@@ -34,7 +34,6 @@ use wslcsdk_sys::types::WslcSignal;
 
 struct EventWaitShared {
     sender: Mutex<Option<oneshot::Sender<bool>>>,
-    wait_handle: std::sync::atomic::AtomicPtr<c_void>,
     is_done: AtomicBool,
 }
 
@@ -168,14 +167,11 @@ pub(crate) async fn wait_win32_event_async(
     let (tx, rx) = oneshot::channel();
     let shared = Arc::new(EventWaitShared {
         sender: Mutex::new(Some(tx)),
-        wait_handle: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         is_done: AtomicBool::new(false),
     });
 
     let raw_ctx = Arc::into_raw(shared.clone()) as *mut EventWaitShared;
     let wait_handle = register_win32_wait(event, raw_ctx, timeout_ms)?;
-
-    shared.wait_handle.store(wait_handle, Ordering::Release);
 
     let guard = WaitGuard {
         shared: shared.clone(),

@@ -60,10 +60,10 @@ pub(super) unsafe extern "system" fn stream_io_trampoline(
         };
 
         // 依据 C 侧回传的流类型选定目标通道
-        let is_stdout = io_handle == WslcProcessIOHandle::STDOUT;
+        let is_stdout = io_handle == WslcProcessIOHandle::Stdout;
         let sender_slot = if is_stdout {
             &state.stdout_tx
-        } else if io_handle == WslcProcessIOHandle::STDERR {
+        } else if io_handle == WslcProcessIOHandle::Stderr {
             &state.stderr_tx
         } else {
             // 官方尚未定义该流类型，安全忽略

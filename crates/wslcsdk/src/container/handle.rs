@@ -213,7 +213,7 @@ impl WslcContainerHandle {
 
     /// 获取容器当前运行状态
     pub fn state(&self) -> Result<WslcContainerState, WslcError> {
-        let mut state = WslcContainerState::INVALID;
+        let mut state = WslcContainerState::Invalid;
         // SAFETY: 入参均为已初始化且存活期覆盖本次调用的本地缓冲区或官方句柄，
         // 出参为合法的可写指针，不涉及未定义行为。
         let hr = unsafe { WslcGetContainerState(self.inner.raw, &mut state) };

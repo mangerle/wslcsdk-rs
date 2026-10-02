@@ -38,7 +38,7 @@ impl WslcRegistryManager {
             CString::new(password).map_err(|e| WslcError::NulError(format!("密码非法: {e}")))?;
 
         let mut token_ptr: *mut i8 = std::ptr::null_mut();
-        let mut token_type = WslcIdentityTokenType::UNKNOWN;
+        let mut token_type = WslcIdentityTokenType::Unknown;
         let mut err_msg: *mut u16 = std::ptr::null_mut();
 
         // SAFETY: 入参均为已初始化且存活期覆盖本次调用的本地缓冲区或官方句柄，

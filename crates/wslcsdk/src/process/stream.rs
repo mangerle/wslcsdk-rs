@@ -210,7 +210,7 @@ mod tests {
         // SAFETY: 调用方保证 context 有效；载荷为调用方持有的有效切片
         unsafe {
             stream_io_trampoline(
-                WslcProcessIOHandle::STDOUT,
+                WslcProcessIOHandle::Stdout,
                 payload.as_ptr(),
                 payload.len() as u32,
                 ctx,
@@ -229,7 +229,7 @@ mod tests {
         // SAFETY: 调用方保证 context 有效；载荷为调用方持有的有效切片
         unsafe {
             stream_io_trampoline(
-                WslcProcessIOHandle::STDERR,
+                WslcProcessIOHandle::Stderr,
                 payload.as_ptr(),
                 payload.len() as u32,
                 ctx,
@@ -327,16 +327,16 @@ mod tests {
         // SAFETY: context 有效；下列三种异常输入均须被安全忽略而不得崩溃
         unsafe {
             // 空载荷
-            stream_io_trampoline(WslcProcessIOHandle::STDOUT, b"data".as_ptr(), 0, ctx);
+            stream_io_trampoline(WslcProcessIOHandle::Stdout, b"data".as_ptr(), 0, ctx);
             // 空上下文指针
             stream_io_trampoline(
-                WslcProcessIOHandle::STDOUT,
+                WslcProcessIOHandle::Stdout,
                 b"data".as_ptr(),
                 4,
                 std::ptr::null_mut(),
             );
             // 空数据指针
-            stream_io_trampoline(WslcProcessIOHandle::STDOUT, std::ptr::null(), 4, ctx);
+            stream_io_trampoline(WslcProcessIOHandle::Stdout, std::ptr::null(), 4, ctx);
         }
 
         assert!(

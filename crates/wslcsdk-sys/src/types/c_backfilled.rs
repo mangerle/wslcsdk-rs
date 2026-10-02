@@ -28,6 +28,7 @@ macro_rules! c_backfilled_enum {
         #[derive(Copy, Clone, Default, PartialEq, Eq)]
         pub struct $name(pub u32);
 
+        #[allow(non_upper_case_globals)]
         impl $name {
             $(
                 $(#[$variant_meta])*
@@ -70,28 +71,42 @@ c_backfilled_enum! {
     /// 会话退出原因
     WslcSessionTerminationReason {
         /// 未知原因
-        UNKNOWN = 0,
+        Unknown = 0,
         /// 会话正常关机退出
-        SHUTDOWN = 1,
+        Shutdown = 1,
         /// 会话异常崩溃退出
-        CRASHED = 2,
+        Crashed = 2,
     }
+}
+
+impl WslcSessionTerminationReason {
+    pub const UNKNOWN: Self = Self::Unknown;
+    pub const SHUTDOWN: Self = Self::Shutdown;
+    pub const CRASHED: Self = Self::Crashed;
 }
 
 c_backfilled_enum! {
     /// 容器运行状态
     WslcContainerState {
         /// 无效状态
-        INVALID = 0,
+        Invalid = 0,
         /// 已创建但尚未启动
-        CREATED = 1,
+        Created = 1,
         /// 正在运行
-        RUNNING = 2,
+        Running = 2,
         /// 已退出
-        EXITED = 3,
+        Exited = 3,
         /// 已被删除
-        DELETED = 4,
+        Deleted = 4,
     }
+}
+
+impl WslcContainerState {
+    pub const INVALID: Self = Self::Invalid;
+    pub const CREATED: Self = Self::Created;
+    pub const RUNNING: Self = Self::Running;
+    pub const EXITED: Self = Self::Exited;
+    pub const DELETED: Self = Self::Deleted;
 }
 
 c_backfilled_enum! {
@@ -101,56 +116,85 @@ c_backfilled_enum! {
     /// 的 `ioHandle` 参数由 C 侧回传，故必须按回填取值处理。
     WslcProcessIOHandle {
         /// 标准输入
-        STDIN = 0,
+        Stdin = 0,
         /// 标准输出
-        STDOUT = 1,
+        Stdout = 1,
         /// 标准错误
-        STDERR = 2,
+        Stderr = 2,
     }
+}
+
+impl WslcProcessIOHandle {
+    pub const STDIN: Self = Self::Stdin;
+    pub const STDOUT: Self = Self::Stdout;
+    pub const STDERR: Self = Self::Stderr;
 }
 
 c_backfilled_enum! {
     /// 进程运行状态
     WslcProcessState {
         /// 未知状态
-        UNKNOWN = 0,
+        Unknown = 0,
         /// 正在运行
-        RUNNING = 1,
+        Running = 1,
         /// 已退出
-        EXITED = 2,
+        Exited = 2,
         /// 被信号终止
-        SIGNALLED = 3,
+        Signalled = 3,
     }
+}
+
+impl WslcProcessState {
+    pub const UNKNOWN: Self = Self::Unknown;
+    pub const RUNNING: Self = Self::Running;
+    pub const EXITED: Self = Self::Exited;
+    pub const SIGNALLED: Self = Self::Signalled;
 }
 
 c_backfilled_enum! {
     /// 镜像拉取进度阶段状态
     WslcImageProgressStatus {
         /// 未知阶段
-        UNKNOWN = 0,
+        Unknown = 0,
         /// 正在拉取镜像层
-        PULLING = 1,
+        Pulling = 1,
         /// 等待中
-        WAITING = 2,
+        Waiting = 2,
         /// 正在下载
-        DOWNLOADING = 3,
+        Downloading = 3,
         /// 正在校验摘要
-        VERIFYING = 4,
+        Verifying = 4,
         /// 正在解包
-        EXTRACTING = 5,
+        Extracting = 5,
         /// 已完成
-        COMPLETE = 6,
+        Complete = 6,
     }
+}
+
+impl WslcImageProgressStatus {
+    pub const UNKNOWN: Self = Self::Unknown;
+    pub const PULLING: Self = Self::Pulling;
+    pub const WAITING: Self = Self::Waiting;
+    pub const DOWNLOADING: Self = Self::Downloading;
+    pub const VERIFYING: Self = Self::Verifying;
+    pub const EXTRACTING: Self = Self::Extracting;
+    pub const COMPLETE: Self = Self::Complete;
 }
 
 c_backfilled_enum! {
     /// 身份认证令牌返回类型
     WslcIdentityTokenType {
         /// 未知类型
-        UNKNOWN = 0,
+        Unknown = 0,
         /// 服务端返回了身份令牌
-        TOKEN = 1,
+        Token = 1,
         /// 服务端未返回令牌，凭据已内嵌
-        CREDENTIALS = 2,
+        Credentials = 2,
     }
+}
+
+impl WslcIdentityTokenType {
+    pub const UNKNOWN: Self = Self::Unknown;
+    pub const TOKEN: Self = Self::Token;
+    pub const CREDENTIALS: Self = Self::Credentials;
 }

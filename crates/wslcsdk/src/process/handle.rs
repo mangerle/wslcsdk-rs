@@ -203,7 +203,7 @@ impl WslcProcessHandle {
 
     /// 获取当前进程运行状态
     pub fn state(&self) -> Result<WslcProcessState, WslcError> {
-        let mut state = WslcProcessState::UNKNOWN;
+        let mut state = WslcProcessState::Unknown;
         // SAFETY: 入参均为已初始化且存活期覆盖本次调用的本地缓冲区或官方句柄，
         // 出参为合法的可写指针，不涉及未定义行为。
         let hr = unsafe { WslcGetProcessState(self.inner.raw, &mut state) };

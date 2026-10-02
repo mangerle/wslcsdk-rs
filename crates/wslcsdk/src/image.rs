@@ -490,13 +490,13 @@ mod tests {
     fn test_image_progress_to_owned_roundtrip() {
         let borrowed = ImageProgress {
             id: "sha256:1234",
-            status: WslcImageProgressStatus::DOWNLOADING,
+            status: WslcImageProgressStatus::Downloading,
             current_bytes: 1024,
             total_bytes: 2048,
         };
         let owned = borrowed.to_owned();
         assert_eq!(owned.id, "sha256:1234");
-        assert_eq!(owned.status, WslcImageProgressStatus::DOWNLOADING);
+        assert_eq!(owned.status, WslcImageProgressStatus::Downloading);
         assert_eq!(owned.current_bytes, 1024);
         assert_eq!(owned.total_bytes, 2048);
     }
@@ -506,7 +506,7 @@ mod tests {
         let mut owned = {
             let borrowed = ImageProgress {
                 id: "layer-a",
-                status: WslcImageProgressStatus::PULLING,
+                status: WslcImageProgressStatus::Pulling,
                 current_bytes: 0,
                 total_bytes: 0,
             };

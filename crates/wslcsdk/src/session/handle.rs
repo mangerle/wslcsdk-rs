@@ -215,7 +215,7 @@ impl WslcSessionHandle {
 
     /// 获取会话终止的具体原因
     pub fn termination_reason(&self) -> Result<WslcSessionTerminationReason, WslcError> {
-        let mut reason = WslcSessionTerminationReason::UNKNOWN;
+        let mut reason = WslcSessionTerminationReason::Unknown;
         // SAFETY: 入参均为已初始化且存活期覆盖本次调用的本地缓冲区或官方句柄，
         // 出参为合法的可写指针，不涉及未定义行为。
         let hr = unsafe { WslcGetSessionTerminationReason(self.inner.raw, &mut reason) };

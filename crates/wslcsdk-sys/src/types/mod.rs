@@ -93,12 +93,12 @@ mod tests {
 
     #[test]
     fn test_c_backfilled_enum_known_name_and_debug() {
-        assert_eq!(WslcContainerState::RUNNING.name(), Some("RUNNING"));
-        assert_eq!(WslcProcessState::SIGNALLED.name(), Some("SIGNALLED"));
-        assert_eq!(format!("{:?}", WslcContainerState::EXITED), "EXITED");
+        assert_eq!(WslcContainerState::Running.name(), Some("Running"));
+        assert_eq!(WslcProcessState::Signalled.name(), Some("Signalled"));
+        assert_eq!(format!("{:?}", WslcContainerState::Exited), "Exited");
         assert_eq!(
-            format!("{:?}", WslcImageProgressStatus::DOWNLOADING),
-            "DOWNLOADING"
+            format!("{:?}", WslcImageProgressStatus::Downloading),
+            "Downloading"
         );
     }
 

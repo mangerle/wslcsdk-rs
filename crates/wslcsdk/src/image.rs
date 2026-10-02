@@ -150,6 +150,15 @@ impl WslcImageManager {
             return Err(WslcError::from_hresult(hr, "获取镜像列表失败"));
         }
 
+        // SDK 声明成功并声称有 count 个镜像，却未给出数组指针：属契约违背。
+        // 若静默放行，下方 as_slice() 会返回空切片，调用方得到「会话内没有镜像」
+        // 这一看似合理却完全错误的结果，且与真实的空会话无从区分。
+        if count > 0 && raw_images.is_null() {
+            return Err(WslcError::UnexpectedSdkResult(format!(
+                "WslcListSessionImages 返回成功状态并声称有 {count} 个镜像，却未给出数组指针"
+            )));
+        }
+
         // 数组所有权移交 ComArray：空指针与 count 为 0 两种情形均被自动收敛，
         // 无论后续如何提前返回，COM 堆内存都会被恰好释放一次
         // SAFETY: raw_images 为官方 _Outptr_result_buffer_ 输出数组，所有权移交本侧

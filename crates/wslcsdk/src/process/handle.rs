@@ -8,7 +8,7 @@ use crate::container::WslcContainerHandle;
 use crate::error::WslcError;
 use std::os::windows::raw::HANDLE;
 use std::sync::Arc;
-use windows_sys::Win32::Foundation::{GetLastError, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows_sys::Win32::Foundation::{WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows_sys::Win32::System::Threading::WaitForSingleObject;
 use wslcsdk_sys::types::{WslcProcess, WslcProcessIOHandle, WslcProcessState, WslcSignal};
 use wslcsdk_sys::{
@@ -286,12 +286,12 @@ impl WslcProcessHandle {
                 Ok(Some(code))
             }
             WAIT_TIMEOUT => Ok(None),
-            WAIT_FAILED => {
-                // SAFETY: 无参数无副作用，仅紧随失败的 Win32 调用读取错误码。
-                let err = unsafe { GetLastError() };
-                Err(WslcError::Hresult(err, "等待进程退出事件失败".to_string()))
-            }
-            other => Err(WslcError::Hresult(
+            WAIT_FAILED => Err(
+                // SAFETY: 紧随失败的 WaitForSingleObject 调用，
+                // 读到的错误码即属于本次失败。
+                unsafe { WslcError::last_win32_error("等待进程退出事件失败") },
+            ),
+            other => Err(WslcError::Win32(
                 other,
                 format!("等待进程退出返回非预期状态: {other}"),
             )),

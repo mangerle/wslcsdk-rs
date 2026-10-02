@@ -146,6 +146,15 @@ pub enum WslcError {
     #[error("Windows 调用失败，HRESULT: 0x{0:08X}，详情: {1}")]
     Hresult(u32, String),
 
+    /// Win32 系统调用失败（错误码来自 `GetLastError`）
+    ///
+    /// 与 [`Self::Hresult`] 分列：Win32 错误码与 HRESULT 是两套编码体系，
+    /// 前者为小整数（`6` = ERROR_INVALID_HANDLE），后者最高位表示严重性。
+    /// 若把 Win32 码塞进 `Hresult`，会按 `0x00000006` 呈现——最高位为 0，
+    /// 与本库「hr >= 0 即成功」的判定方向相反，极易被误读为一次成功的调用。
+    #[error("Win32 调用失败，错误码: {0}，详情: {1}")]
+    Win32(u32, String),
+
     /// SDK 返回了违背其公开契约的非预期结果
     ///
     /// 例如接口声明返回成功状态，却未按要求给出输出指针。此类情形无法归入任何
@@ -237,6 +246,19 @@ impl WslcError {
             .unwrap_or_default();
 
         Self::from_hresult(hr, message)
+    }
+
+    /// 读取 `GetLastError` 并包装为带上下文描述的 [`WslcError::Win32`]
+    ///
+    /// # Safety
+    ///
+    /// 必须**紧随**失败的 Win32 调用之后执行：任何其他 Win32 调用都可能
+    /// 覆盖线程内的最后一个错误码，使读到的值不属于本次失败。
+    pub(crate) unsafe fn last_win32_error(context_desc: impl Into<String>) -> Self {
+        // SAFETY: 由调用方保证本方法紧随失败的 Win32 调用，
+        // 且该 API 无参数、无副作用。
+        let code = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+        Self::Win32(code, context_desc.into())
     }
 
     /// 检查 HRESULT，若失败则解析错误，成功则返回 `Ok(())`

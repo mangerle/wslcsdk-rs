@@ -5,7 +5,7 @@ use crate::error::WslcError;
 use core::ffi::c_void;
 use std::os::windows::raw::HANDLE;
 use std::sync::Arc;
-use windows_sys::Win32::Foundation::{GetLastError, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows_sys::Win32::Foundation::{WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows_sys::Win32::System::Threading::WaitForSingleObject;
 use wslcsdk_sys::types::{
     WslcCrashDumpSubscription, WslcSession, WslcSessionCrashDumpInfo, WslcSessionTerminationReason,
@@ -184,12 +184,12 @@ impl WslcSessionHandle {
         match wait_res {
             WAIT_OBJECT_0 => Ok(true),
             WAIT_TIMEOUT => Ok(false),
-            WAIT_FAILED => {
-                // SAFETY: 无参数无副作用，仅紧随失败的 Win32 调用读取错误码。
-                let err = unsafe { GetLastError() };
-                Err(WslcError::Hresult(err, "等待会话终止事件失败".to_string()))
-            }
-            other => Err(WslcError::Hresult(
+            WAIT_FAILED => Err(
+                // SAFETY: 紧随失败的 WaitForSingleObject 调用，
+                // 读到的错误码即属于本次失败。
+                unsafe { WslcError::last_win32_error("等待会话终止事件失败") },
+            ),
+            other => Err(WslcError::Win32(
                 other,
                 format!("等待会话终止返回非预期状态: {other}"),
             )),

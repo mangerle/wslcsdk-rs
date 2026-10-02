@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="128" height="128">
+  <defs>
+    <linearGradient id="wslcGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e40af"/>
+      <stop offset="55%" stop-color="#0284c7"/>
+      <stop offset="100%" stop-color="#06b6d4"/>
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="8" fill="url(#wslcGrad)"/>
+  <!-- Top Face (Isometric Container Roof) -->
+  <polygon points="16,6.2 24.5,10.8 16,15.4 7.5,10.8" fill="#ffffff"/>
+  <!-- Left Face -->
+  <polygon points="7.2,12.3 14.8,16.4 14.8,25.2 7.2,21.1" fill="#ffffff" opacity="0.75"/>
+  <!-- Right Face -->
+  <polygon points="17.2,16.4 24.8,12.3 24.8,21.1 17.2,25.2" fill="#ffffff" opacity="0.88"/>
+  <!-- Internal Native Speed Accent -->
+  <path d="M15.5 10.5L13.8 13.2h2.2l-1.2 3.3 2.7-3.8h-2.1l1-2.7z" fill="#0284c7"/>
+</svg>

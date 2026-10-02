@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  create-release:
+    name: 创建 GitHub 发布版本与 Changelog
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出完整代码历史
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 基于 Commit 生成分类 Changelog
+        uses: orhun/git-cliff-action@v4
+        id: git-cliff
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+        env:
+          OUTPUT: RELEASE_CHANGELOG.md
+
+      - name: 创建 GitHub Release 并填入更新日志
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE_CHANGELOG.md
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-crates:
+    name: 自动发布至 Crates.io
+    needs: create-release
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 发布底层绑定 (wslcsdk-sys)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if ("$env:CARGO_REGISTRY_TOKEN" -ne "") {
+            cargo publish -p wslcsdk-sys --token $env:CARGO_REGISTRY_TOKEN
+          } else {
+            Write-Warning "未检测到 CARGO_REGISTRY_TOKEN 密钥，跳过 crates.io 发布步骤。"
+          }
+
+      - name: 等待 Crates.io 索引同步
+        run: |
+          Write-Host "等待 crates.io 索引完成分发同步 (30秒)..."
+          Start-Sleep -Seconds 30
+
+      - name: 发布上层安全抽象 (wslcsdk)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if ("$env:CARGO_REGISTRY_TOKEN" -ne "") {
+            cargo publish -p wslcsdk --token $env:CARGO_REGISTRY_TOKEN
+          } else {
+            Write-Warning "未检测到 CARGO_REGISTRY_TOKEN 密钥，跳过 crates.io 发布步骤。"
+          }

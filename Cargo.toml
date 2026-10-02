@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/wslcsdk-sys",
+    "crates/wslcsdk",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.98.1"
+license = "MIT"
+authors = ["wangle"]
+repository = "https://github.com/mangerle/wslcsdk-rs"
+homepage = "https://github.com/mangerle/wslcsdk-rs"
+readme = "README.md"
+
+[workspace.dependencies]
+# 内部成员关联
+wslcsdk-sys = { version = "=3.0.1", path = "crates/wslcsdk-sys" }
+
+# 核心系统与通用依赖
+windows-sys = "0.59"
+thiserror = "2.0"
+log = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["sync", "io-util", "rt", "time"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "unwind"

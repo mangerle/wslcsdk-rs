@@ -1,0 +1,38 @@
+[package]
+name = "wslcsdk-sys"
+version = "3.0.1"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Raw FFI bindings for Microsoft.WSL.Containers (WSLC) SDK 3.0.1"
+readme = "README.md"
+documentation = "https://docs.rs/wslcsdk-sys"
+links = "wslcsdk"
+keywords = ["wsl", "wslc", "wslcsdk", "container", "ffi"]
+categories = ["external-ffi-bindings", "os::windows-apis"]
+include = [
+    "src/**/*",
+    "native/include/**/*",
+    "native/lib/**/*",
+    "build.rs",
+    "Cargo.toml",
+    "API_REGISTRY.md",
+    "README.md",
+]
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_Networking_WinSock",
+] }
+
+[build-dependencies]
+
+[package.metadata.docs.rs]
+default-target = "x86_64-pc-windows-msvc"
+targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]
+rustdoc-args = ["--cfg", "docsrs"]

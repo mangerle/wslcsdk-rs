@@ -300,8 +300,20 @@ impl WslcSessionHandle {
         uri: String,
         registry_auth: Option<String>,
     ) -> Result<(), WslcError> {
-        let (fut, _) = self.pull_image_with_progress_async(uri, registry_auth, 1);
-        fut.await
+        // 刻意不复用 pull_image_with_progress_async：后者会建立进度通道，
+        // 而本方法丢弃接收端后，每条进度都要白做一次 OwnedImageProgress 的
+        // 字符串分配、一次必然失败的 try_send 与一次原子自增。大镜像拉取
+        // 有数千条进度事件，这些开销全部落空。
+        let session = self.clone();
+        run_blocking("异步拉取镜像", move || {
+            WslcImageManager::pull_image(
+                &session,
+                &uri,
+                registry_auth.as_deref(),
+                None::<fn(&crate::image::ImageProgress<'_>) -> bool>,
+            )
+        })
+        .await
     }
 
     /// 异步推送镜像至远程仓库

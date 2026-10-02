@@ -12,11 +12,11 @@ Built against Microsoft's official **`Microsoft.WSL.Containers` (Version 3.0.1 G
 
 ## Overview
 
-This crate provides 1:1 raw C-ABI declarations for all 46 exported C functions, structures, enums, and constants defined in `wslcsdk.h`:
+This crate provides 1:1 raw C-ABI declarations for all 63 exported C functions, structures, enums, and constants defined in `wslcsdk.h`:
 
 - **Dynamic Loading Support**: Pre-configured with MSVC `/DELAYLOAD:wslcsdk.dll` and `delayimp` linking.
 - **Cross-Architecture**: Bundles precompiled import libraries (`.lib`) and dynamic libraries (`.dll`) for both `x64` and `arm64`.
-- **Full API Registry**: Consult [API_REGISTRY.md](API_REGISTRY.md) for the complete list of 46 mapped C functions and contracts.
+- **Full API Registry**: Consult [API_REGISTRY.md](API_REGISTRY.md) for the complete list of 63 mapped C functions and contracts.
 
 ---
 

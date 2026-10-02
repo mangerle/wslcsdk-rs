@@ -8,7 +8,7 @@
 
 - **官方包名**：`Microsoft.WSL.Containers`
 - **版本号**：`3.0.1` (GA 发布日期：2026-09-29)
-- **最低环境要求**：Windows 11 / Windows 10 (WSL 2.9.3+ / 3.0.1+)
+- **最低环境要求**：Windows 11 (WSL 2.9.3+ / 3.0.1+)
 - **头文件路径**：`native/include/wslcsdk.h` (701 行)
 - **动态链接库**：`wslcsdk.dll` (x64 / arm64)
 - **导入符号库**：`wslcsdk.lib` (x64 / arm64)
@@ -17,7 +17,7 @@
 
 ---
 
-## 二、 全量 C 函数签名清单 (共 46 个导出函数)
+## 二、 全量 C 函数签名清单 (共 63 个导出函数)
 
 ### 1. 安装与版本检测 (Installation API) - 3 个
 
@@ -156,6 +156,8 @@
     - **签名**：`STDAPI WslcCreateContainerProcess(_In_ WslcContainer container, _In_ WslcProcessSettings* newProcessSettings, _Out_ WslcProcess* newProcess, _Outptr_opt_result_z_ PWSTR* errorMessage);`
 43. **`WslcGetContainerInitProcess`**
     - **签名**：`STDAPI WslcGetContainerInitProcess(_In_ WslcContainer container, _Out_ WslcProcess* initProcess);`
+    - **功能**：获取指定容器的 init 主进程句柄。
+    - **所有权契约**：根据官方标准用法，返回的 `initProcess` 句柄归调用方拥有，使用完毕后需调用 `WslcReleaseProcess` 释放。SDK 采用容器集中持有并在容器析构时释放至多一次的缓存借用设计，避免重复持有与泄漏。
 44. **`WslcSetContainerInitProcessIOCallbacks`**
     - **签名**：`STDAPI WslcSetContainerInitProcessIOCallbacks(_In_ WslcContainer container, _In_ const WslcProcessCallbacks* callbacks, _In_opt_ PVOID context);`
 45. **`WslcGetProcessPid`**

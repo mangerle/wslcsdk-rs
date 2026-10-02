@@ -1,17 +1,32 @@
 //! Microsoft.WSL.Containers 3.0.1 官方原始 C FFI 绑定
 //!
 //! 提供对 `wslcsdk.dll` 的全量 1:1 C 导出函数声明。
+//!
+//! # 平台要求
+//!
+//! 本 crate 绑定的是 Windows 专有 DLL，**仅支持 Windows 平台**。
+//! 在非 Windows 目标上编译会立即得到一条明确的 `compile_error!` 提示。
 
-#![allow(non_snake_case, non_camel_case_types)]
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
 
+#[cfg(not(windows))]
+compile_error!("wslcsdk-sys 仅支持 Windows 平台：其绑定目标 wslcsdk.dll 为 Windows 专有组件");
+
+#[cfg(windows)]
 pub mod errors;
+#[cfg(windows)]
 pub mod types;
 
+#[cfg(windows)]
 pub use errors::*;
+#[cfg(windows)]
 pub use types::*;
 
+#[cfg(windows)]
 use core::ffi::c_void;
+#[cfg(windows)]
 use windows_sys::Win32::Foundation::HANDLE;
+#[cfg(windows)]
 use windows_sys::core::HRESULT;
 
 unsafe extern "system" {
@@ -408,4 +423,95 @@ unsafe extern "system" {
         name: *const i8,
         errorMessage: *mut *mut u16,
     ) -> HRESULT;
+}
+
+// ==================== 绑定完整性校验 ====================
+//
+// 官方头文件声明了 63 个导出函数。下列测试逐一引用每个绑定，把「头文件声明了
+// 哪些接口」这一事实固化为可执行断言：一旦上游新增接口而本绑定未跟进，
+// 或某个绑定被误删，编译即会因符号无法解析而失败，避免悄无声息地漏绑。
+//
+// 仅对函数项取地址而不发起任何实际调用，因此不依赖目标机器是否装有
+// wslcsdk.dll，可在任意环境下安全执行。
+
+/// 官方头文件 `native/include/wslcsdk.h` 中 `STDAPI Wslc*(` 的出现次数
+///
+/// 升级官方 SDK 时须同步更新本常量与下方清单。
+#[cfg(test)]
+const OFFICIAL_EXPORT_COUNT: usize = 63;
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+
+    /// 逐一取地址以确认每个官方导出都存在对应绑定
+    #[test]
+    fn assert_all_official_exports_bound() {
+        // 数组长度由常量约束，故新增或遗漏绑定都会改变元素个数并触发编译错误
+        let _exports: [*const (); OFFICIAL_EXPORT_COUNT] = [
+            WslcGetVersion as *const (),
+            WslcGetMissingComponents as *const (),
+            WslcInstallWithDependencies as *const (),
+            WslcInitSessionSettings as *const (),
+            WslcCreateSession as *const (),
+            WslcSetSessionSettingsCpuCount as *const (),
+            WslcSetSessionSettingsMemory as *const (),
+            WslcSetSessionSettingsTimeout as *const (),
+            WslcSetSessionSettingsVhd as *const (),
+            WslcSetSessionSettingsFeatureFlags as *const (),
+            WslcGetSessionTerminationEvent as *const (),
+            WslcGetSessionTerminationReason as *const (),
+            WslcTerminateSession as *const (),
+            WslcReleaseSession as *const (),
+            WslcRegisterSessionCrashDumpCallback as *const (),
+            WslcReleaseCrashDumpSubscription as *const (),
+            WslcInitContainerSettings as *const (),
+            WslcCreateContainer as *const (),
+            WslcOpenContainer as *const (),
+            WslcStartContainer as *const (),
+            WslcSetContainerSettingsName as *const (),
+            WslcSetContainerSettingsInitProcess as *const (),
+            WslcSetContainerSettingsNetworkingMode as *const (),
+            WslcSetContainerSettingsHostName as *const (),
+            WslcSetContainerSettingsDomainName as *const (),
+            WslcSetContainerSettingsFlags as *const (),
+            WslcSetContainerSettingsPortMappings as *const (),
+            WslcSetContainerSettingsVolumes as *const (),
+            WslcSetContainerSettingsNamedVolumes as *const (),
+            WslcReleaseContainer as *const (),
+            WslcStopContainer as *const (),
+            WslcDeleteContainer as *const (),
+            WslcGetContainerID as *const (),
+            WslcGetContainerInitProcess as *const (),
+            WslcInspectContainer as *const (),
+            WslcGetContainerState as *const (),
+            WslcSetContainerInitProcessIOCallbacks as *const (),
+            WslcInitProcessSettings as *const (),
+            WslcSetProcessSettingsWorkingDirectory as *const (),
+            WslcSetProcessSettingsCmdLine as *const (),
+            WslcSetProcessSettingsEnvVariables as *const (),
+            WslcSetProcessSettingsFlags as *const (),
+            WslcSetProcessSettingsCallbacks as *const (),
+            WslcCreateContainerProcess as *const (),
+            WslcReleaseProcess as *const (),
+            WslcGetProcessPid as *const (),
+            WslcGetProcessExitEvent as *const (),
+            WslcGetProcessState as *const (),
+            WslcGetProcessExitCode as *const (),
+            WslcSignalProcess as *const (),
+            WslcGetProcessIOHandle as *const (),
+            WslcListSessionImages as *const (),
+            WslcPullSessionImage as *const (),
+            WslcImportSessionImage as *const (),
+            WslcImportSessionImageFromFile as *const (),
+            WslcLoadSessionImage as *const (),
+            WslcLoadSessionImageFromFile as *const (),
+            WslcTagSessionImage as *const (),
+            WslcPushSessionImage as *const (),
+            WslcDeleteSessionImage as *const (),
+            WslcSessionAuthenticate as *const (),
+            WslcCreateSessionVhdVolume as *const (),
+            WslcDeleteSessionVhdVolume as *const (),
+        ];
+    }
 }

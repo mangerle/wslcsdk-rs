@@ -96,6 +96,16 @@ impl WslcRegistryManager {
         };
 
         // 敏感数据卫生：使用 volatile 写入立即清空密码内存，防止堆残留
+        //
+        // 刻意**只清密码**，不清理用户名、服务器地址与返回的令牌：
+        // 1. 三者的敏感级别远低于密码——用户名与服务器地址本就是
+        //    调用方自己持有的入参，清零本副本对该入参无影响；
+        // 2. `identity_token` 需作为返回值交付调用方（`String` 所有权转移），
+        //    其擦除责任在调用方；若在此处连同 `String` 一并清零，
+        //    等于交还一个已被破坏的凭证，破坏 API 契约。
+        //
+        // 之所以用 `write_volatile` 而非普通写入：普通写入可能被编译器
+        // 优化为死存储消除，使清零形同虚设；volatile 写入保证真实发生。
         let mut pass_bytes = c_pass.into_bytes_with_nul();
         for b in &mut pass_bytes {
             // SAFETY: 写入目标为本地刚刚拆解的拥有型字节切片，地址合法有效且独占借用。

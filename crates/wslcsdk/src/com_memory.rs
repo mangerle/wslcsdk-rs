@@ -176,7 +176,16 @@ impl<T> ComArray<T> {
 impl<T> Drop for ComArray<T> {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
-            // SAFETY: 指针非空且所有权已移交本对象；T 为 POD 类型，按字节释放安全
+            // SAFETY: 指针非空且所有权已移交本对象，由 Drop 保证恰好释放一次。
+            //
+            // 此处按**字节**释放（而非逐元素析构），故要求 `T` 为 POD 类型——
+            // 若`T` 含析构函数，按字节释放将直接损坏内存。该约束由
+            // `from_raw` 的文档注释承载，属调用方责任：编译器无法在
+            // 泛型层面校验「无析构函数」。
+            //
+            // `CoTaskMemFree` 只接收单一 void 指针，不感知元素类型与个数，
+            // 故它无法替本类型做类型检查——这正是约束必须写在文档而非
+            // 代码中的原因。
             unsafe { CoTaskMemFree(self.ptr.cast::<c_void>()) };
             self.ptr = ptr::null_mut();
             self.len = 0;

@@ -41,7 +41,10 @@ windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_System_Com",
     "Win32_System_Threading",
-    "Win32_Security", # CreateEventW 依赖 SECURITY_ATTRIBUTES
+    # `CreateEventW` 的签名含 SECURITY_ATTRIBUTES 参数，故本特性为必需项，
+    # 由 `async_ops.rs` 的事件等待测试直接使用。**勿按「零引用」清理**——
+    # 该参数出现在类型签名中（而非函数体内），只查调用点会误判为未使用。
+    "Win32_Security",
     "Win32_System_LibraryLoader",
     "Win32_Networking_WinSock",
 ] }

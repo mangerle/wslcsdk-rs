@@ -35,14 +35,33 @@ impl<T> AsyncReceiver<T> {
         }
     }
 
-    /// 获取因背压满载而丢弃的消息累计计数
+    /// 获取因背压满载而丢弃的**消息条数**累计计数
+    ///
+    /// 注意单位为「条」而非「字节」。本库另有一处近似的字节计数
+    /// [`ProcessStreams::stdout_dropped_bytes`](crate::ProcessStreams::stdout_dropped_bytes)
+    /// 与 [`stderr_dropped_bytes`](crate::ProcessStreams::stderr_dropped_bytes)，
+    /// 两者名字相近但语义不同，混用会得到数量级错误的结论。
     ///
     /// 若底层通道未配置背压丢弃策略，则恒返回 0。
     #[must_use]
-    pub fn dropped_count(&self) -> u64 {
+    pub fn dropped_message_count(&self) -> u64 {
         self.dropped_count
             .as_ref()
             .map_or(0, |c| c.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// 获取因背压满载而丢弃的消息累计计数
+    ///
+    /// 已更名为 [`dropped_message_count`](Self::dropped_message_count)
+    /// 以明示其单位为「条」而非「字节」。保留此方法仅为向后兼容，
+    /// 新代码请使用新名。
+    #[must_use]
+    #[deprecated(
+        since = "0.2.0",
+        note = "单位为「条」而非「字节」，易与字节计数混用；请改用 dropped_message_count"
+    )]
+    pub fn dropped_count(&self) -> u64 {
+        self.dropped_message_count()
     }
 
     /// 异步接收下一个条目；通道关闭且剩余条目耗尽后返回 `None`

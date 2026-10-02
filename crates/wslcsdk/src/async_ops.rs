@@ -43,10 +43,27 @@ unsafe extern "system" fn win32_wait_callback(context: *mut c_void, timer_or_wai
         return;
     }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // SAFETY: 该指针由 Arc::into_raw 从同一 Arc 拆出，引用计数所有权
-        // 随之转移；此处按对应路径恰好重建一次，未发生重复释放。
+        // SAFETY: 裸指针的所有权配对关系（本模块最需论证的一处）：
+        //
+        // 该指针由 [`wait_win32_event_async`] 中的 `Arc::into_raw(shared.clone())`
+        // 拆出，使引用计数 +1 并移交本回调。回收端**有且只有两条路径**，
+        // 二者互斥，故恰好重建一次、不存在重复释放或泄漏：
+        //
+        // 1. 本回调执行 `Arc::from_raw` 重建（此处），随后 `shared` 随闭包
+        //    析构使计数回落；
+        // 2. [`WaitGuard::drop`] 在 `UnregisterWaitEx(handle, NULL)` 返回非零
+        //    （成功取消、承诺回调不再执行）时回收。
+        //
+        // 关键在于二者不会同时生效：若本回调已经开始执行，`is_done` 必为
+        // true（下方先 store 后send），`WaitGuard::drop` 会走
+        // `UnregisterWaitEx(handle, INVALID_HANDLE_VALUE)` 分支而**不**回收；
+        // 反之若回调尚未开始，`is_done` 为 false，drop 走 NULL 分支并回收，
+        // 本回调则永不会被调用。三方（回调、drop、注册失败分支）合起来
+        // 覆盖了全部时序。
         let shared = unsafe { Arc::from_raw(context as *const EventWaitShared) };
         let is_signaled = timer_or_wait_fired == 0;
+        // 先置 is_done 再发送通知：drop 侧以 Acquire 读该标志决定回收路径，
+        // 故此处的 Release 写入必须先于 send，二者不可调换
         shared.is_done.store(true, Ordering::Release);
         if let Ok(mut lock) = shared.sender.lock()
             && let Some(tx) = lock.take()
@@ -69,25 +86,35 @@ impl Drop for WaitGuard {
         }
         if !self.wait_handle.is_null() {
             if self.shared.is_done.load(Ordering::Acquire) {
-                // 回调已完成，此时使用 INVALID_HANDLE_VALUE 瞬间注销并清理句柄，零等待
-                // SAFETY: 句柄来自同一次成功的 RegisterWaitForSingleObject 且未被注销过；
-                // 注销与所有权回收的配对关系由返回值分支判定保证。
+                // 回调已完成（其内的Arc::from_raw 已消费掉本份所有权），
+                // 此处只注销句柄、不再回收裸指针。
+                // 用 INVALID_HANDLE_VALUE 会同步等待正在进行的回调收尾，
+                // 但既然 is_done 已为 true，回调必已越过发送阶段，
+                // 实际等待时间可忽略，故不影响「drop 不阻塞」的前提。
+                //
+                // SAFETY: 句柄来自同一次成功的 RegisterWaitForSingleObject，
+                // 且本类型未实现 Clone、Drop 需独占 &mut self，
+                // 保证句柄至多注销一次。
                 unsafe {
                     let _ = UnregisterWaitEx(self.wait_handle, INVALID_HANDLE_VALUE);
                 }
             } else {
-                // 回调尚未完成，传入 NULL 立即返回，杜绝阻塞当前 Tokio 工作线程
+                // 回调尚未开始，传入 NULL 立即返回，杜绝阻塞当前 Tokio 工作线程
                 let success =
-                    // SAFETY: 句柄来自同一次成功的 RegisterWaitForSingleObject 且未被注销过；
-                    // 注销与所有权回收的配对关系由返回值分支判定保证。
+                    // SAFETY: 句柄来源同上，Drop 独占保证至多注销一次。
                     unsafe { UnregisterWaitEx(self.wait_handle, std::ptr::null_mut()) };
                 if success != 0 {
-                    // 成功取消等待且回调承诺不会执行，严格对偶回收由 into_raw 分配的 Arc 所有权
-                    // SAFETY: 该指针由 Arc::into_raw 从同一 Arc 拆出，引用计数所有权
-                    // 随之转移；此处按对应路径恰好重建一次，未发生重复释放。
+                    // 成功取消等待，官方承诺回调不会再执行，故由本处
+                    // 消费 `Arc::into_raw` 拆出的那一份引用计数。
+                    //
+                    // SAFETY: 该裸指针由 `Arc::into_raw(shared.clone())` 拆出，
+                    // 其回收方在本回调与此处之间二选一（论证见
+                    // `win32_wait_callback` 的 SAFETY 注释）。
+                    // 返回非零即等价于「官方承诺不再执行回调」，
+                    // 故此处回收不会与回调内的 `Arc::from_raw` 重复。
                     let _ = unsafe { Arc::from_raw(self.raw_ctx) };
                 }
-                // 若返回 0，表明回调已并发调度并执行，所有权交由回调中的 Arc::from_raw 释放
+                // 若返回 0，回调已被并发调度，其内的 Arc::from_raw 负责回收
             }
             self.wait_handle = std::ptr::null_mut();
         }

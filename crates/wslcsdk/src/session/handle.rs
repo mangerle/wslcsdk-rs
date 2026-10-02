@@ -234,6 +234,16 @@ impl WslcSessionHandle {
     }
 
     /// 注册 Linux 进程崩溃转储监控回调
+    ///
+    /// # 并发契约
+    ///
+    /// 回调上下文为 `Box<Mutex<F>>`：官方可能在多个线程间并发派发崩溃事件，
+    /// 而本方法只要求 `F: Send`（而非 `Sync`），故闭包内部状态无法假定
+    /// 只被单线程访问。以 `Mutex` 包裹后，即便官方并发回调，
+    /// 对闭包的调用也严格串行化。
+    ///
+    /// 这与本库另两处回调上下文（镜像拉取进度、组件安装进度）采用
+    /// `Box<Mutex<F>>` 的做法保持一致——三处回调的防护等级不应有别。
     pub fn register_crash_dump_callback<F>(
         &self,
         callback: F,
@@ -241,7 +251,7 @@ impl WslcSessionHandle {
     where
         F: Fn(&WslcSessionCrashDumpInfo) + Send + 'static,
     {
-        let boxed_cb = Box::new(callback);
+        let boxed_cb = Box::new(std::sync::Mutex::new(callback));
         let ctx = Box::into_raw(boxed_cb);
 
         let mut sub = WslcCrashDumpSubscription::NULL;
@@ -277,6 +287,11 @@ impl WslcSessionHandle {
     }
 }
 
+/// 崩溃转储事件的 C 回调跳板
+///
+/// 官方可能在多个线程间并发派发崩溃事件，故上下文以 `Box<Mutex<F>>` 承接：
+/// 本方法只要求 `F: Send`（而非 `Sync`），闭包内部状态无法假定单线程访问，
+/// 必须由`Mutex` 串行化对闭包的调用。
 unsafe extern "system" fn crash_trampoline<F>(
     info: *const WslcSessionCrashDumpInfo,
     context: *mut c_void,
@@ -293,19 +308,27 @@ unsafe extern "system" fn crash_trampoline<F>(
                 info_ref.pid,
                 info_ref.signal
             );
-            // SAFETY: 上下文指针由本库在注册时从 Box 拆出并原样回传，
-            // 类型与注册时的 F 严格一致。
-            let cb = unsafe { &*(context as *const F) };
-            cb(info_ref);
+            // SAFETY: 上下文指针由本库在注册时从 Box<Mutex<F>> 拆出并原样回传，
+            // 类型与注册时的 F 严格一致；官方契约保证回调期间该内存始终有效。
+            let mutex = unsafe { &*(context as *const std::sync::Mutex<F>) };
+            // 官方要求回调尽快返回，故此处只取锁执行而不做任何阻塞等待；
+            // 若闭包自身 panic，已由外层 catch_unwind 兜住，不会 unwind 穿过 C栈帧
+            if let Ok(callback) = mutex.lock() {
+                callback(info_ref);
+            }
         }));
     }
 }
 
+/// 类型擦除后的上下文释放函数
+///
+/// `F` 必须与注册时移交的 `Box<Mutex<F>>` 严格一致，否则按错误类型回收
+/// 将导致内存损坏。
 unsafe fn drop_ctx<F>(context: *mut c_void) {
     if !context.is_null() {
         // SAFETY: 指针由 Box::into_raw 移交所有权，本处为唯一回收路径，
-        // 不会发生重复释放。
-        let _ = unsafe { Box::from_raw(context as *mut F) };
+        // 不会发生重复释放；类型 F 与注册时一致。
+        let _ = unsafe { Box::from_raw(context as *mut std::sync::Mutex<F>) };
     }
 }
 
@@ -318,7 +341,7 @@ pub struct CrashDumpSubscription {
     _session: WslcSessionHandle,
     /// 官方不透明订阅句柄
     raw: WslcCrashDumpSubscription,
-    /// 指向注册时移交的 `Box<F>`，仅在注销完成后释放
+    /// 指向注册时移交的 `Box<Mutex<F>>`，仅在注销完成后释放
     ctx: *mut c_void,
     /// 类型擦除后的释放函数，用以按原类型回收闭包内存
     drop_fn: unsafe fn(*mut c_void),
@@ -358,8 +381,9 @@ impl Drop for CrashDumpSubscription {
     }
 }
 
-// SAFETY: `raw` 为官方不透明订阅句柄，`ctx` 为指向 `Box<F>` 的裸指针。
-// 底层回调要求 `F: Send`，且注册时已通过 `Box::into_raw` 移交所有权，故该指针
+// SAFETY: `raw` 为官方不透明订阅句柄，`ctx` 为指向 `Box<Mutex<F>>` 的裸指针。
+// 底层回调要求 `F: Send`，`Mutex<F>` 在 `F: Send` 时亦为 `Send`，
+// 且注册时已通过 `Box::into_raw` 移交所有权，故该指针
 // 可安全地随本类型跨线程移动。
 unsafe impl Send for CrashDumpSubscription {}
 

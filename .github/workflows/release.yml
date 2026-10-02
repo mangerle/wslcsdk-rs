@@ -50,7 +50,16 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           if ("$env:CARGO_REGISTRY_TOKEN" -ne "") {
-            cargo publish -p wslcsdk-sys --token $env:CARGO_REGISTRY_TOKEN
+            $output = cargo publish -p wslcsdk-sys 2>&1 | Out-String
+            Write-Host $output
+            if ($LASTEXITCODE -ne 0) {
+              if ($output -match "already exists on crates.io") {
+                Write-Host "检测到 wslcsdk-sys 当前版本已发布至 crates.io，跳过此步骤。"
+                $global:LASTEXITCODE = 0
+              } else {
+                exit 1
+              }
+            }
           } else {
             Write-Warning "未检测到 CARGO_REGISTRY_TOKEN 密钥，跳过 crates.io 发布步骤。"
           }
@@ -65,7 +74,16 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           if ("$env:CARGO_REGISTRY_TOKEN" -ne "") {
-            cargo publish -p wslcsdk --token $env:CARGO_REGISTRY_TOKEN
+            $output = cargo publish -p wslcsdk 2>&1 | Out-String
+            Write-Host $output
+            if ($LASTEXITCODE -ne 0) {
+              if ($output -match "already exists on crates.io") {
+                Write-Host "检测到 wslcsdk 当前版本已发布至 crates.io，跳过此步骤。"
+                $global:LASTEXITCODE = 0
+              } else {
+                exit 1
+              }
+            }
           } else {
             Write-Warning "未检测到 CARGO_REGISTRY_TOKEN 密钥，跳过 crates.io 发布步骤。"
           }

@@ -26,7 +26,7 @@ Add this crate to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-wslcsdk = "0.2.0"
+wslcsdk = "0.3.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 

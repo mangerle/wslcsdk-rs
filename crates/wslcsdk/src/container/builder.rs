@@ -20,17 +20,21 @@ use wslcsdk_sys::*;
 /// 本类型不实现 `Clone`：其内嵌的 [`ProcessBuilder`] 可能已注册流式 I/O 回调，
 /// 浅克隆会使多个容器共用同一套回调上下文与通道。
 #[derive(Debug)]
+// 字段以 pub(crate) 而非 pub(super) 暴露：client.rs 的 BoundContainerBuilder
+// 逐个转发这些方法，其转发正确性的回归测试需要读取底层建造者的字段以断言
+// 「值落到了正确的位置」。按 AGENTS.md 的最小权限原则，crate 内可见已是
+// 满足该需求的最小放宽。
 pub struct ContainerBuilder {
-    pub(super) image_name: String,
-    pub(super) name: Option<String>,
-    pub(super) init_process: Option<ProcessBuilder>,
-    pub(super) networking_mode: Option<WslcContainerNetworkingMode>,
-    pub(super) host_name: Option<String>,
-    pub(super) domain_name: Option<String>,
-    pub(super) flags: WslcContainerFlags,
-    pub(super) port_mappings: Vec<ContainerPortMappingData>,
-    pub(super) volumes: Vec<(PathBuf, String, bool)>,
-    pub(super) named_volumes: Vec<(String, String, bool)>,
+    pub(crate) image_name: String,
+    pub(crate) name: Option<String>,
+    pub(crate) init_process: Option<ProcessBuilder>,
+    pub(crate) networking_mode: Option<WslcContainerNetworkingMode>,
+    pub(crate) host_name: Option<String>,
+    pub(crate) domain_name: Option<String>,
+    pub(crate) flags: WslcContainerFlags,
+    pub(crate) port_mappings: Vec<ContainerPortMappingData>,
+    pub(crate) volumes: Vec<(PathBuf, String, bool)>,
+    pub(crate) named_volumes: Vec<(String, String, bool)>,
 }
 
 impl ContainerBuilder {

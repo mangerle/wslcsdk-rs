@@ -267,11 +267,26 @@ impl<'a> BoundContainerBuilder<'a> {
 }
 
 /// WSLC 客户端配置构建器
-#[derive(Debug, Default)]
+///
+/// 刻意**不派生 `Default`**：`Default` 对 `bool` 的取值恒为 `false`，
+/// 若照常派生将使 `WslcClientBuilder::default()` 得到
+/// `auto_init_mta = false`，与 [`new`](Self::new) 的 `true` 相反。
+/// 两者都是对外公开的「默认构造」入口，行为分歧会让
+/// [`WslcClient::is_mta_active`] 的返回值随调用写法而变——这是一次静默降级，
+/// 既无日志也无报错，只能靠类型约束消除。故 [`Default`] 改为手工实现并
+/// 委托 [`new`](Self::new)，使两个入口严格同源。
+#[derive(Debug)]
 pub struct WslcClientBuilder {
     auto_init_mta: bool,
     session_name: Option<String>,
     session_dir: Option<PathBuf>,
+}
+
+impl Default for WslcClientBuilder {
+    /// 与 [`WslcClientBuilder::new`] 严格同源，避免两个默认构造入口行为分歧
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl WslcClientBuilder {
@@ -371,6 +386,13 @@ mod tests {
     use super::*;
     use crate::error::WslcDomainError;
 
+    /// 构造一个空句柄会话，仅用于让绑定建造者完成转发，不触发任何 SDK 调用
+    fn fake_session() -> WslcSessionHandle {
+        // 空句柄不携带任何需释放的所有权，构造行为本身是安全的
+        // SAFETY: 传入空句柄与占位名称，不产生任何官方调用
+        unsafe { WslcSessionHandle::from_raw(Default::default(), "fake-session") }
+    }
+
     /// SDK 缺失时环境探测应给出领域错误而非崩溃
     ///
     /// 仅校验前置探测环节，不实际创建会话：真实会话创建依赖宿主机运行时，
@@ -405,6 +427,53 @@ mod tests {
         assert!(builder.session_dir.is_none(), "默认不应预设会话目录");
     }
 
+    /// 回归：绑定建造者的每个转发方法都必须真正作用到底层建造者
+    ///
+    /// 缺陷成因：`BoundContainerBuilder` 逐个手工转发 `ContainerBuilder`
+    /// 的配置方法（因 `Deref` 方案会让免参 `build()` 被遮蔽，不可行）。
+    /// 手工转发的风险在于「转发了但转错字段」，例如把 `host_name` 写进
+    /// `domain_name`——编译照样通过，调用方却在不知情的情况下配错了容器。
+    ///
+    /// 故逐一调用转发方法后取回底层建造者，断言各字段落到了正确位置。
+    /// 日后新增转发方法时，本用例即是要同步扩充之处。
+    #[test]
+    fn test_bound_builder_forwarding_lands_on_correct_fields() {
+        // 直接构造绑定建造者：转发方法的正确性不依赖会话是否真实可用，
+        // 故用空句柄会话即可，无需触发任何 SDK 调用
+        let session = fake_session();
+        let bound = BoundContainerBuilder {
+            inner: ContainerBuilder::new("alpine:latest"),
+            session: &session,
+        };
+
+        let inner = bound
+            .name("forwarded-name")
+            .host_name("forwarded-host")
+            .domain_name("forwarded-domain")
+            .auto_remove(true)
+            .add_port_mapping(8080, 80, crate::WslcPortProtocol::Tcp)
+            .add_volume(r"C:\data", "/data", true)
+            .add_named_volume("myvol", "/vol", false)
+            .into_inner();
+
+        assert_eq!(inner.name.as_deref(), Some("forwarded-name"));
+        assert_eq!(inner.host_name.as_deref(), Some("forwarded-host"));
+        assert_eq!(inner.domain_name.as_deref(), Some("forwarded-domain"));
+        assert_eq!(
+            inner.flags,
+            wslcsdk_sys::WSLC_CONTAINER_FLAG_AUTO_REMOVE,
+            "auto_remove 须置位对应标志"
+        );
+        assert_eq!(inner.port_mappings.len(), 1);
+        assert_eq!(inner.port_mappings[0].windows_port, 8080);
+        assert_eq!(inner.port_mappings[0].container_port, 80);
+        assert_eq!(inner.volumes.len(), 1);
+        assert_eq!(inner.volumes[0].1, "/data");
+        assert!(inner.volumes[0].2, "只读标志须被转发");
+        assert_eq!(inner.named_volumes.len(), 1);
+        assert_eq!(inner.named_volumes[0].0, "myvol");
+    }
+
     /// 构建器的会话配置应可链式覆盖
     #[test]
     fn test_builder_accepts_session_overrides() {
@@ -415,5 +484,37 @@ mod tests {
         assert!(!builder.auto_init_mta);
         assert_eq!(builder.session_name.as_deref(), Some("custom"));
         assert_eq!(builder.session_dir.as_deref(), Some(Path::new("C:\\temp")));
+    }
+
+    /// 回归：`Default` 与 `new()` 必须给出相同的默认配置
+    ///
+    /// 缺陷成因：本类型曾`#[derive(Debug, Default)]`，而 `Default` 对 `bool`
+    /// 恒取 `false`，与 `new()` 显式置 `auto_init_mta: true` 相反。
+    /// 派生属编译期展开、无运行时成本，故 clippy 等 lint 均无法发现此分歧；
+    /// 只能由本用例在测试期锁定。
+    ///
+    /// 影响：`WslcClientBuilder::default()` 会静默关闭进程级 MTA 守护，
+    /// 使 [`WslcClient::is_mta_active`] 的结果随构造写法而变，
+    /// 且无任何日志或错误提示——属静默降级。
+    #[test]
+    fn test_default_delegates_to_new() {
+        let from_default = WslcClientBuilder::default();
+        let from_new = WslcClientBuilder::new();
+
+        // 逐字段比对而非只查 auto_init_mta：任何字段日后新增到该结构体
+        // 却忘记同步 Default 的情况，都应在此用例暴露
+        assert_eq!(
+            from_default.auto_init_mta, from_new.auto_init_mta,
+            "Default 与 new() 的 auto_init_mta 必须一致，否则两个默认构造入口行为分歧"
+        );
+        assert_eq!(from_default.session_name, from_new.session_name);
+        assert_eq!(from_default.session_dir, from_new.session_dir);
+
+        // 关键语义锁定：默认必须维持 MTA 守护
+        assert!(
+            from_default.auto_init_mta,
+            "默认配置应维持进程级 COM MTA 套间；若此项为 false，\
+             说明 Default 未正确委托 new()"
+        );
     }
 }

@@ -53,12 +53,17 @@ unsafe extern "system" fn win32_wait_callback(context: *mut c_void, timer_or_wai
         // 2. [`WaitGuard::drop`] 在 `UnregisterWaitEx(handle, NULL)` 返回非零
         //    （成功取消、承诺回调不再执行）时回收。
         //
-        // 关键在于二者不会同时生效：若本回调已经开始执行，`is_done` 必为
-        // true（下方先 store 后send），`WaitGuard::drop` 会走
-        // `UnregisterWaitEx(handle, INVALID_HANDLE_VALUE)` 分支而**不**回收；
-        // 反之若回调尚未开始，`is_done` 为 false，drop 走 NULL 分支并回收，
-        // 本回调则永不会被调用。三方（回调、drop、注册失败分支）合起来
-        // 覆盖了全部时序。
+        // 关键在于**裁定权在 `UnregisterWaitEx` 的返回值，而不在 `is_done`**。
+        // 下方先 `from_raw` 再置 `is_done`，二者之间存在一个窗口，期间 drop
+        // 侧读到的 `is_done` 仍为 false 并走 NULL 分支；但此刻回调已被调度，
+        // `UnregisterWaitEx(handle, NULL)` 必返回 0，故 drop 据此不回收，
+        // 所有权仍归本回调。三方（回调、drop、注册失败分支）合起来覆盖了
+        // 全部时序。
+        //
+        // 切不可据「回调已开始则 `is_done` 必为 true」简化掉那个返回值检查：
+        // 该前提在上述窗口内不成立，删掉检查即造成重复释放。`is_done` 的
+        // 唯一职责是决定传给 `UnregisterWaitEx` 的第二个参数，不参与所有权
+        // 判定。
         let shared = unsafe { Arc::from_raw(context as *const EventWaitShared) };
         let is_signaled = timer_or_wait_fired == 0;
         // 先置 is_done 再发送通知：drop 侧以 Acquire 读该标志决定回收路径，
@@ -103,8 +108,11 @@ impl Drop for WaitGuard {
             // raw_ctx 为 Arc::as_ptr 的取值，cast 回原类型合法。
             let wait_handle = self.wait_handle as HANDLE;
             if self.shared.is_done.load(Ordering::Acquire) {
-                // 回调已完成（其内的Arc::from_raw 已消费掉本份所有权），
-                // 此处只注销句柄、不再回收裸指针。
+                // 回调内的 `Arc::from_raw` 必已执行（`is_done` 的 store 排在其后），
+                // 本份所有权已被消费，故此处只注销句柄、不再回收裸指针。
+                // 注意 `is_done` 仅用于选择下面的注销方式，所有权的裁定始终
+                // 以 `UnregisterWaitEx` 的返回值为准——论证见
+                // `win32_wait_callback` 的 SAFETY 注释。
                 // 用 INVALID_HANDLE_VALUE 会同步等待正在进行的回调收尾，
                 // 但既然 is_done 已为 true，回调必已越过发送阶段，
                 // 实际等待时间可忽略，故不影响「drop 不阻塞」的前提。
@@ -244,7 +252,11 @@ pub(crate) fn wait_win32_event_async(
 ///
 /// [`tokio::task::spawn_blocking`] 派发的任务**无法被取消**。调用方超时或放弃等待时，
 /// 底层调用仍会执行到底，本方法不提供中止能力。
-async fn run_blocking<F, R>(operation: &str, task: F) -> Result<R, WslcError>
+///
+/// 句柄模块（会话、进程）的等待类异步方法同样经本函数取事件句柄与退出码——
+/// 那是一次跨进程 COM 往返，直接写在 `async fn` 里会把 Tokio 工作线程堵住，
+/// 与本模块各阻塞接口的调度策略必须一致。
+pub(crate) async fn run_blocking<F, R>(operation: &str, task: F) -> Result<R, WslcError>
 where
     F: FnOnce() -> Result<R, WslcError> + Send + 'static,
     R: Send + 'static,
@@ -529,6 +541,39 @@ mod tests {
         assert_send(&fut);
         // 只验证类型约束，不实际 poll（空句柄会在同步段即返回错误）
         drop(fut);
+    }
+
+    /// 会话与进程的等待类 future 同样必须可用于 `tokio::spawn`
+    ///
+    /// 成因与 [`test_wait_future_is_send`] 同源：`wait_termination_async` /
+    /// `wait_async` 曾就地调用 `termination_event()` / `exit_event()` 取事件
+    /// 句柄，把 `HANDLE` 裸指针留在跨 await 的生成器状态里，future 随之失去
+    /// `Send`；同时那也是一次跨进程 COM 往返，堵住了 Tokio 工作线程。
+    /// 两处已改为在阻塞线程池中取句柄并以 `usize` 跨越任务边界。
+    ///
+    /// 本用例的**编译通过**即是断言：一旦有人把裸句柄取回异步上下文，
+    /// 此处即报 E0277，无需任何运行时行为即可挡住回归。
+    #[test]
+    fn test_handle_wait_futures_are_send() {
+        use crate::container::WslcContainerHandle;
+        use crate::process::WslcProcessHandle;
+        use wslcsdk_sys::types::{WslcContainer, WslcProcess, WslcSession};
+
+        fn assert_send<T: Send>(_: &T) {}
+
+        // 空句柄不携带任何需释放的所有权，仅用于取得类型约束
+        // SAFETY: 入参为各自类型的 NULL 常量，不指向任何需释放的资源
+        let session = unsafe { WslcSessionHandle::from_raw(WslcSession::NULL, "fake-session") };
+        let container =
+            WslcContainerHandle::from_raw_inner(WslcContainer::NULL, session.clone(), None)
+                .expect("构造测试用容器句柄失败");
+        let process =
+            // SAFETY: 空进程句柄不指向任何需释放的资源，容器仅作存活期担保
+            unsafe { WslcProcessHandle::from_raw(WslcProcess::NULL, container) };
+
+        // 只验证类型约束，不实际 poll（空句柄会在首行即返回错误）
+        assert_send(&session.wait_termination_async(1));
+        assert_send(&process.wait_async(1));
     }
 
     #[test]

@@ -209,8 +209,15 @@ impl WslcSessionHandle {
         if self.inner.raw.is_null() {
             return Err(WslcError::InvalidHandle);
         }
-        let event = self.termination_event()?;
-        crate::async_ops::wait_win32_event_async(event, timeout_ms).await
+        // 取事件句柄是一次跨进程 COM 往返，不得在异步上下文中直接执行：
+        // 同模块的 terminate_async 已卸载至阻塞线程池，此处不应例外。
+        // 句柄以 usize 跨越任务边界——HANDLE 是裸指针，会让闭包返回值失去 Send。
+        let session = self.clone();
+        let event = crate::async_ops::run_blocking("获取会话终止事件句柄", move || {
+            session.termination_event().map(|h| h as usize)
+        })
+        .await?;
+        crate::async_ops::wait_win32_event_async(event as HANDLE, timeout_ms).await
     }
 
     /// 获取会话终止的具体原因

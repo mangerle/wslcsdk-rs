@@ -488,6 +488,8 @@ mod tests {
         );
 
         // 官方给出描述时，二者并存且上下文在前
+        // SAFETY: com_wide_ptr 返回的指针由 ComWideString 接管并释放一次，
+        // 未在本测试中重复使用，亦不跨越其作用域
         let err = unsafe {
             WslcError::from_hresult_and_raw_msg(
                 WSLC_E_IMAGE_NOT_FOUND,

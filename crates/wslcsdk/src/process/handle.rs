@@ -368,13 +368,25 @@ impl WslcProcessHandle {
         if self.inner.raw.is_null() {
             return Err(WslcError::InvalidHandle);
         }
-        let event = self.exit_event()?;
-        let is_signaled = crate::async_ops::wait_win32_event_async(event, timeout_ms).await?;
-        if is_signaled {
-            let code = self.exit_code()?;
-            Ok(Some(code))
-        } else {
-            Ok(None)
+        // 取事件句柄与退出码都是跨进程 COM 往返，均须卸载至阻塞线程池：
+        // 直接写在 async fn 里会堵住 Tokio 工作线程。后者位于 await 之后，
+        // 仍在异步上下文中，同样不可就地调用。
+        // 事件句柄以 usize 跨越任务边界——HANDLE 是裸指针，会让闭包返回值失去 Send。
+        let process = self.clone();
+        let event = crate::async_ops::run_blocking("获取进程退出事件句柄", move || {
+            process.exit_event().map(|h| h as usize)
+        })
+        .await?;
+
+        let is_signaled =
+            crate::async_ops::wait_win32_event_async(event as HANDLE, timeout_ms).await?;
+        if !is_signaled {
+            return Ok(None);
         }
+
+        let process = self.clone();
+        let code =
+            crate::async_ops::run_blocking("获取进程退出码", move || process.exit_code()).await?;
+        Ok(Some(code))
     }
 }

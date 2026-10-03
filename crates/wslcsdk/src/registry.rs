@@ -56,6 +56,26 @@ impl std::fmt::Debug for AuthTokenResult {
     }
 }
 
+impl Drop for AuthTokenResult {
+    fn drop(&mut self) {
+        // 敏感数据卫生：令牌是可直接用于拉取私有镜像的 Bearer 凭证，
+        // 敏感级别等同密码。若放任 String 直接释放，明文会留在堆上等待
+        // 被复用，可被堆转储或内存扫描取得。
+        //
+        // 与密码处一致，用 write_volatile 而非普通写入：后者可能被编译器
+        // 当作死存储消除，使清零形同虚设。
+        //
+        // SAFETY: 写入目标为本类型独占持有的 String 缓冲区，长度自 as_mut_vec
+        // 取得故不会越界；全零字节是合法 UTF-8，清零后 String 仍处于有效状态，
+        // 其析构可正常进行。
+        unsafe {
+            for byte in self.identity_token.as_mut_vec() {
+                std::ptr::write_volatile(byte, 0);
+            }
+        }
+    }
+}
+
 /// 镜像仓库管理器
 ///
 /// 全部方法均为关联函数，不持有状态；使用 `WslcSessionHandle` 显式指定操作会话。
@@ -106,6 +126,15 @@ impl WslcRegistryManager {
         //
         // 之所以用 `write_volatile` 而非普通写入：普通写入可能被编译器
         // 优化为死存储消除，使清零形同虚设；volatile 写入保证真实发生。
+        //
+        // 之所以清零**确实擦到了**交给官方的那块内存：`into_bytes_with_nul`
+        // 走 `Box<[u8]>::into_vec`，复用 CString 原有分配而不另建副本，
+        // 故下方写入的就是 SDK 实际读取过的缓冲区。
+        //
+        // 已知的残余（本库无法消除，记录备查）：`CString::new` 内部先
+        // `to_vec()` 再 `push(0)`，而 `to_vec()` 的容量恰等于长度，故 push
+        // 会触发一次扩容——扩容前的那份缓冲区含明文密码且被直接释放，
+        // 未及清零。要消除它只能改用自定义的安全分配器，代价远超收益。
         let mut pass_bytes = c_pass.into_bytes_with_nul();
         for b in &mut pass_bytes {
             // SAFETY: 写入目标为本地刚刚拆解的拥有型字节切片，地址合法有效且独占借用。

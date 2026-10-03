@@ -114,6 +114,17 @@ impl FromStr for ContainerPortMappingData {
     }
 }
 
+// ==================== 生命周期保全结构体 ====================
+//
+// 官方 `WslcSetContainerSettings*` 系列只接收裸指针，并不接管其内存，
+// 故这些指针指向的数据必须存活到 `WslcCreateContainer` 返回为止。下列
+// 结构体即为此存在：它们本身不参与任何逻辑，字段名一律以 `_` 前缀标示
+// 「仅靠 Drop 时序发挥作用」。
+//
+// 这是本库最重要的一处隐式契约——一旦有人把这些字段视为无用而删除，
+// 编译照样通过，官方调用却会读到已释放的内存。下划线前缀与本节注释是
+// 目前唯一的防线，改动前请先读完。
+
 pub(crate) struct RetainedBasicMetadata {
     pub(crate) _name: Option<CString>,
     pub(crate) _host: Option<CString>,

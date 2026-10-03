@@ -178,7 +178,11 @@ impl WslcContainerHandle {
         // SAFETY: err_msg 为官方 _Outptr_opt_result_z_ 输出参数，
         // 其所有权在本行交由 RAII 包装接管并自动释放。
         unsafe {
-            WslcError::check(hr, err_msg)?;
+            WslcError::check(
+                hr,
+                err_msg,
+                format!("打开容器失败，名称或 ID: '{name_or_id}'"),
+            )?;
         }
 
         if raw.is_null() {
@@ -239,7 +243,9 @@ impl WslcContainerHandle {
         let hr = unsafe { WslcStartContainer(self.inner.raw, flags, &mut err_msg) };
         // SAFETY: 入参均为已初始化且存活期覆盖本次调用的本地缓冲区或官方句柄，
         // 出参为合法的可写指针，不涉及未定义行为。
-        unsafe { WslcError::check(hr, err_msg) }?;
+        unsafe {
+            WslcError::check(hr, err_msg, format!("启动容器失败，attach 模式: {attach}"))?;
+        }
         log::info!("WSLC 容器启动成功，attach 模式: {attach}");
         Ok(())
     }
@@ -253,7 +259,13 @@ impl WslcContainerHandle {
             unsafe { WslcStopContainer(self.inner.raw, signal, timeout_seconds, &mut err_msg) };
         // SAFETY: 入参均为已初始化且存活期覆盖本次调用的本地缓冲区或官方句柄，
         // 出参为合法的可写指针，不涉及未定义行为。
-        unsafe { WslcError::check(hr, err_msg) }?;
+        unsafe {
+            WslcError::check(
+                hr,
+                err_msg,
+                format!("停止容器失败，信号: {signal:?}，超时: {timeout_seconds} 秒"),
+            )?;
+        }
         log::info!("WSLC 容器停止成功，信号: {signal:?}，超时: {timeout_seconds} 秒");
         Ok(())
     }
@@ -272,7 +284,9 @@ impl WslcContainerHandle {
         let hr = unsafe { WslcDeleteContainer(self.inner.raw, flags, &mut err_msg) };
         // SAFETY: 入参均为已初始化且存活期覆盖本次调用的本地缓冲区或官方句柄，
         // 出参为合法的可写指针，不涉及未定义行为。
-        unsafe { WslcError::check(hr, err_msg) }?;
+        unsafe {
+            WslcError::check(hr, err_msg, format!("删除容器失败，强制标志: {force}"))?;
+        }
         log::info!("WSLC 容器删除成功，强制标志: {force}");
         Ok(())
     }
@@ -283,16 +297,15 @@ impl WslcContainerHandle {
         // SAFETY: 入参均为已初始化且存活期覆盖本次调用的本地缓冲区或官方句柄，
         // 出参为合法的可写指针，不涉及未定义行为。
         let hr = unsafe { WslcInspectContainer(self.inner.raw, &mut inspect_ptr) };
-        if hr < 0 || inspect_ptr.is_null() {
+        // 失败码与「返回成功却未给出指针」是两种性质不同的故障，必须分开报：
+        // 后者若也交给 from_hresult，会把成功码 0 说成「Windows 调用失败」
+        if hr < 0 {
             return Err(WslcError::from_hresult(hr, "检查容器元数据失败"));
         }
 
         // SAFETY: inspect_ptr 为官方 _Outptr_result_z_ 输出参数，所有权移交本侧
-        let json = unsafe { ComAnsiString::from_raw(inspect_ptr) }.ok_or_else(|| {
-            WslcError::UnexpectedSdkResult(
-                "WslcInspectContainer 返回成功状态却未给出检查数据指针".to_string(),
-            )
-        })?;
+        let json = unsafe { ComAnsiString::from_raw(inspect_ptr) }
+            .ok_or_else(|| WslcError::missing_output("WslcInspectContainer", hr))?;
 
         // 显式处理非 UTF-8：静默降级为空串会让 JSON 解析报出「语法错误」，
         // 把问题指向错误的方位，掩盖真正的根因
@@ -323,8 +336,13 @@ impl WslcContainerHandle {
         // SAFETY: 入参均为已初始化且存活期覆盖本次调用的本地缓冲区或官方句柄，
         // 出参为合法的可写指针，不涉及未定义行为。
         let hr = unsafe { WslcGetContainerInitProcess(self.inner.raw, &mut raw) };
-        if hr < 0 || raw.is_null() {
+        // 两分支分列：hr 为成功码却拿不到句柄属官方违背契约，
+        // 报成「HRESULT: 0x00000000」会掩盖真正的故障性质
+        if hr < 0 {
             return Err(WslcError::from_hresult(hr, "获取容器主进程句柄失败"));
+        }
+        if raw.is_null() {
+            return Err(WslcError::missing_output("WslcGetContainerInitProcess", hr));
         }
 
         // 回填缓存。并发下可能有其他线程抢先写入，此时必须自行释放本次多

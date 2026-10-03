@@ -64,7 +64,13 @@ impl WslcVolumeManager {
         let hr = unsafe { WslcCreateSessionVhdVolume(session.as_raw(), &req, &mut err_msg) };
         // SAFETY: 入参均为已初始化且存活期覆盖本次调用的本地缓冲区或官方句柄，
         // 出参为合法的可写指针，不涉及未定义行为。
-        unsafe { WslcError::check(hr, err_msg) }?;
+        unsafe {
+            WslcError::check(
+                hr,
+                err_msg,
+                format!("创建 VHD 卷失败，名称: '{}'", options.name),
+            )?;
+        }
         log::info!(
             "VHD 卷创建成功，名称: '{}'，大小: {} 字节",
             options.name,
@@ -89,7 +95,9 @@ impl WslcVolumeManager {
             unsafe { WslcDeleteSessionVhdVolume(session.as_raw(), c_name.as_ptr(), &mut err_msg) };
         // SAFETY: 入参均为已初始化且存活期覆盖本次调用的本地缓冲区或官方句柄，
         // 出参为合法的可写指针，不涉及未定义行为。
-        unsafe { WslcError::check(hr, err_msg) }?;
+        unsafe {
+            WslcError::check(hr, err_msg, format!("删除 VHD 卷失败，名称: '{name}'"))?;
+        }
         log::info!("VHD 卷删除成功，名称: '{}'", name);
         Ok(())
     }

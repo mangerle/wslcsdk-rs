@@ -309,8 +309,12 @@ impl WslcProcessHandle {
         // SAFETY: 入参均为已初始化且存活期覆盖本次调用的本地缓冲区或官方句柄，
         // 出参为合法的可写指针，不涉及未定义行为。
         let hr = unsafe { WslcGetProcessIOHandle(self.inner.raw, io, &mut handle) };
-        if hr < 0 || handle.is_null() {
+        // 两分支分列：hr 为成功码却拿不到句柄属官方违背契约，
+        // 报成「HRESULT: 0x00000000」会掩盖真正的故障性质
+        if hr < 0 {
             Err(WslcError::from_hresult(hr, "获取进程标准流句柄失败"))
+        } else if handle.is_null() {
+            Err(WslcError::missing_output("WslcGetProcessIOHandle", hr))
         } else {
             Ok(handle)
         }

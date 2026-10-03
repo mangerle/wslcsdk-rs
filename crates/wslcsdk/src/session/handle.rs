@@ -271,7 +271,13 @@ impl WslcSessionHandle {
 
         // SAFETY: 入参均为已初始化且存活期覆盖本次调用的本地缓冲区或官方句柄，
         // 出参为合法的可写指针，不涉及未定义行为。
-        if let Err(e) = unsafe { WslcError::check(hr, err_msg) } {
+        if let Err(e) = unsafe {
+            WslcError::check(
+                hr,
+                err_msg,
+                format!("注册崩溃转储监控回调失败，所属会话: '{}'", self.name()),
+            )
+        } {
             // SAFETY: 指针由 Box::into_raw 移交所有权，本处为唯一回收路径，
             // 不会发生重复释放。
             let _ = unsafe { Box::from_raw(ctx) };

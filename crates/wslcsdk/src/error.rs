@@ -227,6 +227,19 @@ impl WslcError {
         }
     }
 
+    /// 官方返回非失败码，却未给出其声明的输出指针
+    ///
+    /// 此类情形若沿用 [`Self::from_hresult`]，`hr` 会是一个成功码（0 或正值），
+    /// 错误文本遂呈现为「Windows 调用失败，HRESULT: 0x00000000」——把一个
+    /// **成功码当作失败原因**报出，既自相矛盾，又把排查方向从「SDK 违背契约」
+    /// 带偏到「某次 Windows 调用失败」。故在此单列一支，与真正的 HRESULT
+    /// 失败区分开：调用方只需匹配 [`Self::UnexpectedSdkResult`] 即可识别。
+    pub(crate) fn missing_output(api_name: &str, hr: HRESULT) -> Self {
+        Self::UnexpectedSdkResult(format!(
+            "{api_name} 返回 HRESULT 0x{hr:08X}（非失败码）却未给出其声明的输出指针"
+        ))
+    }
+
     /// 检查 HRESULT，若小于 0 则解析为带上下文描述的领域错误
     pub(crate) fn check_hr(hr: HRESULT, context_desc: impl Into<String>) -> Result<(), Self> {
         if hr >= 0 {
@@ -240,14 +253,32 @@ impl WslcError {
     ///
     /// `msg_ptr` 交由 [`ComWideString`] 托管：无论本方法走哪个分支，COM 堆内存
     /// 都会被自动释放，调用方无需也不应再手工调用 `CoTaskMemFree`。
-    pub(crate) unsafe fn from_hresult_and_raw_msg(hr: HRESULT, msg_ptr: *mut u16) -> Self {
+    ///
+    /// # 为何必须另行传入调用点上下文
+    ///
+    /// 官方并非每次失败都给出错误描述——静默失败时 `msg_ptr` 为空串或空指针。
+    /// 若把官方描述直接当作错误上下文，此类失败会退化成「容器未找到: 」这类
+    /// 没有现场信息的空壳消息：调用方明知出了业务终态，却无从判断是哪一步操作、
+    /// 针对哪个对象失败。故上下文一律由调用点提供，官方描述降级为附加详情。
+    pub(crate) unsafe fn from_hresult_and_raw_msg(
+        hr: HRESULT,
+        msg_ptr: *mut u16,
+        context_desc: impl Into<String>,
+    ) -> Self {
         // SAFETY: 调用方均为官方 API 的 _Outptr_opt_result_z_ 输出参数，
         // 所有权在交接给本方法的那一刻即转由 Rust 侧接管
-        let message = unsafe { ComWideString::from_raw(msg_ptr) }
+        let official = unsafe { ComWideString::from_raw(msg_ptr) }
             .map(|msg| msg.to_string_lossy())
             .unwrap_or_default();
 
-        Self::from_hresult(hr, message)
+        let context = context_desc.into();
+        let detail = if official.is_empty() {
+            context
+        } else {
+            format!("{context}，SDK 描述: {official}")
+        };
+
+        Self::from_hresult(hr, detail)
     }
 
     /// 读取 `GetLastError` 并包装为带上下文描述的 [`WslcError::Win32`]
@@ -266,7 +297,15 @@ impl WslcError {
     /// 检查 HRESULT，若失败则解析错误，成功则返回 `Ok(())`
     ///
     /// 无论成功与否，`msg_ptr` 都会被 [`ComWideString`] 自动释放。
-    pub(crate) unsafe fn check(hr: HRESULT, msg_ptr: *mut u16) -> Result<(), Self> {
+    ///
+    /// `context_desc` 为调用点上下文（建议带上操作对象标识），是错误描述的主干；
+    /// 官方给出的错误描述若非空，则拼在其后作为详情。二者不可互换——官方常
+    /// 静默失败，此时唯一可用的现场信息只剩调用点上下文。
+    pub(crate) unsafe fn check(
+        hr: HRESULT,
+        msg_ptr: *mut u16,
+        context_desc: impl Into<String>,
+    ) -> Result<(), Self> {
         if hr >= 0 {
             // SAFETY: msg_ptr 为官方输出的宽字符串指针，
             // 本函数负责接管其所有权并在读取后释放。
@@ -275,7 +314,7 @@ impl WslcError {
         } else {
             // SAFETY: msg_ptr 为官方输出的宽字符串指针，
             // 本函数负责接管其所有权并在读取后释放。
-            Err(unsafe { Self::from_hresult_and_raw_msg(hr, msg_ptr) })
+            Err(unsafe { Self::from_hresult_and_raw_msg(hr, msg_ptr, context_desc) })
         }
     }
 }
@@ -339,24 +378,33 @@ mod tests {
             let err = WslcError::from_hresult_and_raw_msg(
                 WSLC_E_CONTAINER_NOT_FOUND,
                 std::ptr::null_mut(),
+                "打开容器失败",
             );
             assert_eq!(
                 err,
-                WslcError::Domain(WslcDomainError::ContainerNotFound(String::new()))
+                WslcError::Domain(WslcDomainError::ContainerNotFound(
+                    "打开容器失败".to_string()
+                ))
             );
 
-            let err2 =
-                WslcError::from_hresult_and_raw_msg(WSLC_E_IMAGE_NOT_FOUND, std::ptr::null_mut());
+            let err2 = WslcError::from_hresult_and_raw_msg(
+                WSLC_E_IMAGE_NOT_FOUND,
+                std::ptr::null_mut(),
+                "拉取镜像失败",
+            );
             assert_eq!(
                 err2,
-                WslcError::Domain(WslcDomainError::ImageNotFound(String::new()))
+                WslcError::Domain(WslcDomainError::ImageNotFound("拉取镜像失败".to_string()))
             );
 
-            let err3 =
-                WslcError::from_hresult_and_raw_msg(WSLC_E_VM_NOT_RUNNING, std::ptr::null_mut());
+            let err3 = WslcError::from_hresult_and_raw_msg(
+                WSLC_E_VM_NOT_RUNNING,
+                std::ptr::null_mut(),
+                "创建会话失败",
+            );
             assert_eq!(
                 err3,
-                WslcError::Domain(WslcDomainError::VmNotRunning(String::new()))
+                WslcError::Domain(WslcDomainError::VmNotRunning("创建会话失败".to_string()))
             );
         }
 
@@ -414,6 +462,89 @@ mod tests {
         assert!(WslcError::check_hr(0, "S_OK").is_ok());
         assert!(WslcError::check_hr(1, "S_FALSE 亦视为成功").is_ok());
         assert!(WslcError::check_hr(WSLC_E_CONTAINER_NOT_FOUND, "失败").is_err());
+    }
+
+    /// 官方静默失败时，错误描述仍须带调用点上下文
+    ///
+    /// `check` 曾把官方错误消息直接当作上下文。官方大量接口在失败时并不填写
+    /// `err_msg`，此时领域错误的描述退化为「容器未找到: 」这类空壳：调用方
+    /// 明知命中了业务终态，却无从判断是哪一步操作、针对哪个对象失败。
+    /// 故上下文一律由调用点提供，官方描述降级为附加详情。
+    #[test]
+    fn test_silent_failure_still_carries_call_site_context() {
+        // 官方静默（空消息指针）
+        // SAFETY: 空指针由 ComWideString::from_raw 判空处理，不涉及解引用
+        let err = unsafe {
+            WslcError::from_hresult_and_raw_msg(
+                WSLC_E_CONTAINER_NOT_FOUND,
+                std::ptr::null_mut(),
+                "启动容器失败",
+            )
+        };
+        assert_eq!(
+            err.to_string(),
+            "容器未找到: 启动容器失败",
+            "官方未给出描述时，上下文必须独占描述位"
+        );
+
+        // 官方给出描述时，二者并存且上下文在前
+        let err = unsafe {
+            WslcError::from_hresult_and_raw_msg(
+                WSLC_E_IMAGE_NOT_FOUND,
+                com_wide_ptr("镜像不存在"),
+                "删除镜像失败",
+            )
+        };
+        assert_eq!(
+            err.to_string(),
+            "镜像未找到: 删除镜像失败，SDK 描述: 镜像不存在",
+            "官方有描述时，上下文在前、官方描述在后"
+        );
+    }
+
+    /// 在 COM 堆上构造一块以 NUL 结尾的宽字符串，所有权交由接收方释放
+    ///
+    /// # Safety
+    ///
+    /// 返回的指针必须由 [`ComWideString::from_raw`] 或等价路径接管并释放一次。
+    unsafe fn com_wide_ptr(text: &str) -> *mut u16 {
+        let units: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        // SAFETY: 申请长度按元素数与元素宽度计算，返回值判空后写入同样长度，
+        // 不越界；该内存随后由接收方经 ComWideString 释放。
+        unsafe {
+            let ptr =
+                windows_sys::Win32::System::Com::CoTaskMemAlloc(units.len() * size_of::<u16>())
+                    as *mut u16;
+            if ptr.is_null() {
+                return ptr;
+            }
+            std::ptr::copy_nonoverlapping(units.as_ptr(), ptr, units.len());
+            ptr
+        }
+    }
+
+    /// 官方「声明成功却未给出输出指针」不得报成 HRESULT 0x00000000
+    ///
+    /// 三处调用点（容器检查、取 init 进程句柄、取进程 IO 句柄）曾把
+    /// `hr < 0 || ptr.is_null()` 合并为一个分支并统一交给 `from_hresult`，
+    /// 于是成功码 0 被当成失败原因报出。此用例锁定分支拆分后的归属。
+    #[test]
+    fn test_missing_output_is_not_reported_as_success_hresult() {
+        let err = WslcError::missing_output("WslcInspectContainer", 0);
+        assert!(
+            matches!(err, WslcError::UnexpectedSdkResult(_)),
+            "契约违背须归入 UnexpectedSdkResult，实际为: {err:?}"
+        );
+        assert!(!matches!(err, WslcError::Hresult(..)));
+
+        let text = err.to_string();
+        assert!(
+            text.contains("WslcInspectContainer"),
+            "错误须点名接口: {text}"
+        );
+        assert!(text.contains("0x00000000"), "错误须保留官方返回值: {text}");
+        // 不得呈现为「调用失败」——那会把成功码说成失败
+        assert!(!text.contains("调用失败"), "实际描述: {text}");
     }
 
     #[test]

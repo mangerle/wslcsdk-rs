@@ -90,11 +90,15 @@ pub fn init_process_mta() -> Result<ProcessMtaGuard, WslcError> {
     // SAFETY: 出参 cookie 为合法的可写指针，
     // 入参为进程级 API，无需额外前置条件。
     let hr = unsafe { CoIncrementMTAUsage(&mut cookie) };
-    if hr < 0 || cookie.is_null() {
+    // 两分支分列：成功码却拿不到 cookie 属 COM 运行时违背契约，
+    // 报成「HRESULT: 0x00000000」会掩盖真正的故障性质
+    if hr < 0 {
         Err(WslcError::from_hresult(
             hr,
             "进程级 CoIncrementMTAUsage 初始化失败",
         ))
+    } else if cookie.is_null() {
+        Err(WslcError::missing_output("CoIncrementMTAUsage", hr))
     } else {
         static FIRST_LOGGED: std::sync::atomic::AtomicBool =
             std::sync::atomic::AtomicBool::new(false);

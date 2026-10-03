@@ -296,7 +296,11 @@ impl ProcessBuilder {
         // SAFETY: err_msg 为官方 _Outptr_opt_result_z_ 输出参数，
         // 其所有权在本行交由 RAII 包装接管并自动释放。
         unsafe {
-            WslcError::check(hr, err_msg)?;
+            WslcError::check(
+                hr,
+                err_msg,
+                format!("容器内派生进程失败，命令行: {cmd_repr}"),
+            )?;
         }
 
         if raw_process.is_null() {

@@ -270,7 +270,13 @@ impl WslcImageManager {
         }
         // SAFETY: 入参均为已初始化且存活期覆盖本次调用的本地缓冲区或官方句柄，
         // 出参为合法的可写指针，不涉及未定义行为。
-        unsafe { WslcError::check(hr, err_msg) }?;
+        unsafe {
+            WslcError::check(
+                hr,
+                err_msg,
+                format!("拉取镜像失败，实际拉取地址: '{resolved_uri}'"),
+            )?;
+        }
         // 同时记录请求 URI 与实际拉取地址：二者在配置了镜像加速器时并不相同，
         // 只打前者会让审计无法回答「镜像究竟从哪个主机拉取」——那恰是加速器
         // 引入的供应链投毒路径上最关键的追问（见 registry 模块的安全提示）
@@ -309,7 +315,9 @@ impl WslcImageManager {
         };
         // SAFETY: 入参均为已初始化且存活期覆盖本次调用的本地缓冲区或官方句柄，
         // 出参为合法的可写指针，不涉及未定义行为。
-        unsafe { WslcError::check(hr, err_msg) }?;
+        unsafe {
+            WslcError::check(hr, err_msg, format!("导入镜像失败，名称: '{image_name}'"))?;
+        }
         log::info!(
             "镜像导入完成，名称: '{}'，所属会话: '{}'",
             image_name,
@@ -340,7 +348,13 @@ impl WslcImageManager {
         };
         // SAFETY: 入参均为已初始化且存活期覆盖本次调用的本地缓冲区或官方句柄，
         // 出参为合法的可写指针，不涉及未定义行为。
-        unsafe { WslcError::check(hr, err_msg) }?;
+        unsafe {
+            WslcError::check(
+                hr,
+                err_msg,
+                format!("载入镜像失败，所属会话: '{}'", session.name()),
+            )?;
+        }
         log::info!("镜像载入完成，所属会话: '{}'", session.name());
         Ok(())
     }
@@ -371,7 +385,13 @@ impl WslcImageManager {
         };
         // SAFETY: 入参均为已初始化且存活期覆盖本次调用的本地缓冲区或官方句柄，
         // 出参为合法的可写指针，不涉及未定义行为。
-        unsafe { WslcError::check(hr, err_msg) }
+        unsafe {
+            WslcError::check(
+                hr,
+                err_msg,
+                format!("从句柄载入镜像失败，所属会话: '{}'", session.name()),
+            )
+        }
     }
 
     /// 从内存流导入镜像
@@ -404,7 +424,13 @@ impl WslcImageManager {
         };
         // SAFETY: 入参均为已初始化且存活期覆盖本次调用的本地缓冲区或官方句柄，
         // 出参为合法的可写指针，不涉及未定义行为。
-        unsafe { WslcError::check(hr, err_msg) }
+        unsafe {
+            WslcError::check(
+                hr,
+                err_msg,
+                format!("从句柄导入镜像失败，名称: '{image_name}'"),
+            )
+        }
     }
 
     /// 为已有镜像打标签
@@ -433,7 +459,9 @@ impl WslcImageManager {
         let hr = unsafe { WslcTagSessionImage(session.as_raw(), &options, &mut err_msg) };
         // SAFETY: 入参均为已初始化且存活期覆盖本次调用的本地缓冲区或官方句柄，
         // 出参为合法的可写指针，不涉及未定义行为。
-        unsafe { WslcError::check(hr, err_msg) }
+        unsafe {
+            WslcError::check(hr, err_msg, format!("镜像打标签失败，目标: '{repo}:{tag}'"))
+        }
     }
 
     /// 推送镜像至远程仓库 (支持进度监控)
@@ -496,7 +524,9 @@ impl WslcImageManager {
         }
         // SAFETY: 入参均为已初始化且存活期覆盖本次调用的本地缓冲区或官方句柄，
         // 出参为合法的可写指针，不涉及未定义行为。
-        unsafe { WslcError::check(hr, err_msg) }?;
+        unsafe {
+            WslcError::check(hr, err_msg, format!("推送镜像失败，目标: '{image}'"))?;
+        }
         log::info!(
             "镜像推送完成，镜像: '{}'，所属会话: '{}'",
             image,
@@ -533,7 +563,13 @@ impl WslcImageManager {
         let hr = unsafe { WslcDeleteSessionImage(session.as_raw(), c_str.as_ptr(), &mut err_msg) };
         // SAFETY: 入参均为已初始化且存活期覆盖本次调用的本地缓冲区或官方句柄，
         // 出参为合法的可写指针，不涉及未定义行为。
-        unsafe { WslcError::check(hr, err_msg) }?;
+        unsafe {
+            WslcError::check(
+                hr,
+                err_msg,
+                format!("删除镜像失败，名称或 ID: '{name_or_id}'"),
+            )?;
+        }
         log::info!(
             "镜像删除成功，目标: '{}'，所属会话: '{}'",
             name_or_id,

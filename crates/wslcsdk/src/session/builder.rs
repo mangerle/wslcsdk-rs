@@ -252,7 +252,7 @@ impl SessionBuilder {
         // SAFETY: err_msg 为官方 _Outptr_opt_result_z_ 输出参数，
         // 其所有权在本行交由 RAII 包装接管并自动释放。
         unsafe {
-            WslcError::check(hr, err_msg)?;
+            WslcError::check(hr, err_msg, format!("创建会话失败，名称: '{}'", self.name))?;
         }
 
         if raw_session.is_null() {

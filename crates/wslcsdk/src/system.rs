@@ -180,15 +180,12 @@ impl WslcSystem {
         ) where
             F: FnMut(WslcComponentFlags, u32, u32),
         {
-            if !context.is_null() {
-                // SAFETY: 上下文指针由 Box::into_raw 分配并包装于 Mutex 中，
-                // 保证多线程并发回调时具备互斥同步保障。
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-                    let mutex = &*(context as *const std::sync::Mutex<F>);
-                    if let Ok(mut callback) = mutex.lock() {
-                        callback(component, progress_steps, total_steps);
-                    }
-                }));
+            // SAFETY: context 由下方以 Box<Mutex<F>> 拆出并原样回传，
+            // 类型与拆出时严格一致。
+            unsafe {
+                crate::callback::invoke_callback::<F, _>(context, |callback| {
+                    callback(component, progress_steps, total_steps);
+                });
             }
         }
 
@@ -204,6 +201,12 @@ impl WslcSystem {
         // 出参为合法的可写指针，不涉及未定义行为。
         let hr = unsafe { WslcInstallWithDependencies(components, options, cb, ctx) };
         if !ctx.is_null() {
+            // 与镜像拉取/推送进度的处理一致：在官方调用返回后立刻回收，
+            // 依赖「官方只在本次调用期间同步派发进度回调」这一未在官方文档
+            // 中载明的假设。组件安装耗时尤长，若官方改为后台线程异步派发，
+            // 此处即构成 use-after-free，须改为先注销回调再释放上下文的
+            // 二段式生命周期（参见 image.rs::progress_trampoline 的文档）。
+            //
             // SAFETY: ctx 在本函数开头由 Box::into_raw 分配，调用结束立即安全回收
             let _ = unsafe { Box::from_raw(ctx as *mut std::sync::Mutex<F>) };
         }

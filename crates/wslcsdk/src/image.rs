@@ -1,5 +1,6 @@
 //! WSLC 镜像枚举、远程拉取、推送与归档载入
 
+use crate::callback::invoke_callback;
 use crate::com_memory::ComArray;
 use crate::error::WslcError;
 use crate::session::{WslcSessionHandle, path_to_wide_null};
@@ -90,6 +91,20 @@ fn to_hex(bytes: &[u8]) -> String {
 ///
 /// 跨 FFI 边界必须捕获 panic：unwind 穿过 C 栈帧属未定义行为。
 ///
+/// # 上下文生命周期的隐含契约（调用方必须自行确认）
+///
+/// `ctx` 指向的 `Box<Mutex<F>>` 由 [`WslcImageManager::pull_image`] 与
+/// [`WslcImageManager::push_image_with_progress`] 在**官方调用返回后立刻**回收。
+/// 这隐含一项未见于官方文档的假设：官方只在该次调用期间同步派发进度回调，
+/// 不会把回调上下文留存到调用返回之后。
+///
+/// 该假设对拉取这类长耗时操作尤为关键——若官方改为在后台线程异步派发，
+/// 提前回收即构成 use-after-free。届时须改为「先向官方注销回调、再释放
+/// 上下文」的二段式生命周期，与
+/// [`CrashDumpSubscription`](crate::CrashDumpSubscription) 的析构顺序一致：
+/// 它在 `Drop` 中先 `WslcReleaseCrashDumpSubscription` 注销订阅，确认官方
+/// 不会再触发回调，之后才释放闭包内存。
+///
 /// # Safety
 ///
 /// `ctx` 必须是由调用方以 `Box::into_raw` 移交的 `Mutex<F>` 指针，且在官方停止回调前
@@ -101,36 +116,38 @@ unsafe extern "system" fn progress_trampoline<F>(
 where
     F: FnMut(&ImageProgress<'_>) -> bool,
 {
-    if ctx.is_null() || msg.is_null() {
+    if msg.is_null() {
         return windows_sys::Win32::Foundation::S_OK;
     }
-    // SAFETY: 官方保证回调期间 msg 指向有效的进度结构体，
-    // 其内部指针的有效性由官方契约保证。
-    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-        let raw = &*msg;
-        let id_str = if !raw.id.is_null() {
-            CStr::from_ptr(raw.id).to_str().unwrap_or_default()
-        } else {
-            ""
-        };
-        let progress = ImageProgress {
-            id: id_str,
-            status: raw.status,
-            current_bytes: raw.detail.current_bytes,
-            total_bytes: raw.detail.total_bytes,
-        };
-        let mutex = &*(ctx as *const std::sync::Mutex<F>);
-        if let Ok(mut callback) = mutex.lock() {
-            if callback(&progress) {
-                windows_sys::Win32::Foundation::S_OK
+    // SAFETY: ctx 由 pull_image / push_image_with_progress 以
+    // Box<Mutex<F>> 拆出并原样回传，类型与拆出时严格一致。
+    let should_continue = unsafe {
+        invoke_callback::<F, _>(ctx, |callback| {
+            // SAFETY: 官方保证回调期间 msg 指向有效的进度结构体，
+            // 其内部指针的有效性由官方契约保证。
+            let raw = &*msg;
+            let id_str = if !raw.id.is_null() {
+                // SAFETY: id 非空且为官方保证以 NUL 结尾的字符串。
+                CStr::from_ptr(raw.id).to_str().unwrap_or_default()
             } else {
-                windows_sys::Win32::Foundation::E_ABORT
-            }
-        } else {
-            windows_sys::Win32::Foundation::E_ABORT
-        }
-    }));
-    res.unwrap_or(windows_sys::Win32::Foundation::E_ABORT)
+                ""
+            };
+            let progress = ImageProgress {
+                id: id_str,
+                status: raw.status,
+                current_bytes: raw.detail.current_bytes,
+                total_bytes: raw.detail.total_bytes,
+            };
+            callback(&progress)
+        })
+    };
+
+    match should_continue {
+        Some(true) => windows_sys::Win32::Foundation::S_OK,
+        // 上下文为空、锁中毒或闭包 panic：一律按中止处理，
+        // 避免让官方继续向一个已不可用的回调推送数据
+        _ => windows_sys::Win32::Foundation::E_ABORT,
+    }
 }
 
 /// 全部方法均为关联函数，不持有状态；使用 `WslcSessionHandle` 显式指定操作会话。
@@ -244,6 +261,10 @@ impl WslcImageManager {
         // 出参为合法的可写指针，不涉及未定义行为。
         let hr = unsafe { WslcPullSessionImage(session.as_raw(), &options, &mut err_msg) };
         if !ctx.is_null() {
+            // 此处立即回收，依赖「官方只在本次调用期间同步派发进度回调」这一
+            // 未在官方文档中载明的假设。该假设及其失效时的改法见
+            // progress_trampoline 的文档。
+            //
             // SAFETY: ctx 在本函数开头由 Box::into_raw 分配，调用结束立即安全回收
             let _ = unsafe { Box::from_raw(ctx as *mut std::sync::Mutex<F>) };
         }

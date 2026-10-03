@@ -26,6 +26,9 @@ compile_error!("wslcsdk 仅支持 Windows 平台：WSLC 依赖 Win32 COM/RPC 与
 // 平台相关模块统一门控：非 Windows 目标下整体不参与编译（见上方 compile_error）
 #[cfg(windows)]
 pub mod async_ops;
+// C 回调上下文的统一访问入口：仅 crate 内部使用，不对外暴露
+#[cfg(windows)]
+pub(crate) mod callback;
 #[cfg(windows)]
 pub mod channel;
 #[cfg(windows)]

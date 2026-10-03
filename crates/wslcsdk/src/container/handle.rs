@@ -394,6 +394,14 @@ impl WslcContainerHandle {
     /// 官方要求本接口必须在 [`WslcContainerHandle::start`] 之前、且配合
     /// `attach` 模式调用；对已运行的容器调用不会产生任何效果。
     ///
+    /// # 调用顺序约束
+    ///
+    /// 本方法必须在 [`WslcContainerHandle::get_init_process`] **之前**调用。
+    /// 派生的进程句柄在构造时快照一次「是否已注册 IO 回调」，此后不再回查
+    /// 容器；若先取句柄再注册回调，那个句柄仍会认为自己可以索取 IO 句柄
+    /// （见 [`WslcProcessHandle::io_handle`] 的互斥校验），从而返回一个已被
+    /// 官方消耗的无效句柄。
+    ///
     /// # 与 IO 句柄的互斥性
     ///
     /// 官方明确规定：一旦注册任何 IO 回调，相应的 IO 句柄即被消耗，无法再通过
@@ -409,12 +417,35 @@ impl WslcContainerHandle {
     /// 返回的 [`ProcessStreams`] 持有回调上下文的强引用。只要它与容器句柄均未释放，
     /// 回调即可安全地把字节流传入通道；二者全部释放后注册表条目自动移除，
     /// 此后即便 C 侧仍触发回调也会被安全忽略。
+    ///
+    /// # 不可重复注册
+    ///
+    /// 每个容器至多注册一次。重复注册会让官方把回调上下文切换到新 ID，
+    /// 而**先前返回的 `ProcessStreams` 的发送端无人关闭**——它既收不到后续
+    /// 数据，也永远等不到退出通知。调用方的
+    /// `while let Some(chunk) = streams.stdout.recv().await` 与
+    /// `wait_exit()` 将永久挂起，且不产生任何错误或日志。
+    /// 故在入口即行拒绝。
+    ///
+    /// # Errors
+    ///
+    /// 容器句柄无效、注册失败，或本容器已注册过 IO 回调时返回错误。
     pub fn with_init_process_io_callbacks(
         &self,
         capacity: usize,
     ) -> Result<ProcessStreams, WslcError> {
         if self.inner.raw.is_null() {
             return Err(WslcError::InvalidHandle);
+        }
+
+        // 前置检查置于官方调用之前：一旦调用成功，官方侧的回调上下文即被
+        // 切换，先前的流已无法挽救，故必须在造成既成事实前拦下
+        if self.has_init_io_callbacks() {
+            return Err(WslcError::InvalidConfiguration(
+                "init 进程 IO 回调已注册，不可重复注册：重复注册会使先前返回的 \
+                 ProcessStreams 永久收不到退出通知"
+                    .to_string(),
+            ));
         }
 
         let setup = setup_streaming_channels(capacity);
@@ -429,13 +460,32 @@ impl WslcContainerHandle {
         };
         WslcError::check_hr(hr, "设置主进程 IO 回调失败")?;
 
-        // 记录到容器自身，使后续派生的进程句柄能够感知「IO 句柄已被消耗」
-        *self
-            .inner
-            .init_stream_state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(setup.state);
+        // 回填到容器自身，使后续派生的进程句柄能够感知「IO 句柄已被消耗」。
+        // 并发下可能已被抢先注册，此时本次注册虽成功却无人持有接收端，
+        // 直接报错并丢弃（StreamState 析构会移除其注册表条目）。
+        {
+            let mut slot = self
+                .inner
+                .init_stream_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if slot.is_some() {
+                return Err(WslcError::InvalidConfiguration(
+                    "init 进程 IO 回调已被并发注册，本次注册作废".to_string(),
+                ));
+            }
+            *slot = Some(setup.state);
+        }
 
         Ok(setup.streams)
+    }
+
+    /// 本容器是否已注册过 init 进程 IO 回调
+    fn has_init_io_callbacks(&self) -> bool {
+        self.inner
+            .init_stream_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
     }
 }

@@ -244,6 +244,42 @@ fn test_bound_builder_needs_no_session_argument() {
     cleanup_session_dir("bound-builder-test");
 }
 
+/// 回归：init 进程 IO 回调不可重复注册
+///
+/// 重复注册会让官方把回调上下文切换到新 ID，而先前返回的 ProcessStreams
+/// 的发送端无人关闭——调用方的 `recv()` 与 `wait_exit()` 将永久挂起，
+/// 且不产生任何错误或日志。故第二次注册必须在造成既成事实前被拒绝。
+#[test]
+#[ignore = "需要可用的 WSL Containers 运行时，请用 cargo test -- --ignored 显式运行"]
+fn test_init_io_callbacks_cannot_be_registered_twice() {
+    let session = SessionBuilder::new_default("init-io-twice-session")
+        .expect("会话构建器创建失败")
+        .build()
+        .expect("会话创建失败");
+
+    let container = ContainerBuilder::new("alpine:latest")
+        .name("init-io-twice-container")
+        .auto_remove(true)
+        .build(&session)
+        .expect("容器创建失败");
+
+    let first = container.with_init_process_io_callbacks(64);
+    assert!(first.is_ok(), "首次注册应当成功");
+
+    let second = container.with_init_process_io_callbacks(64);
+    match second {
+        Err(wslcsdk::WslcError::InvalidConfiguration(_)) => {}
+        other => panic!("第二次注册应被拒绝，实际为: {other:?}"),
+    }
+
+    // 首次返回的接收端在容器删除后必须能正常终止消费循环，
+    // 而不是永久挂起——这正是重复注册曾导致的后果
+    let _ = first;
+    let _ = container.delete(true);
+    session.terminate().expect("终止会话失败");
+    cleanup_session_dir("init-io-twice-session");
+}
+
 /// 清理指定名称测试会话在宿主机文件系统上留下的存储目录
 ///
 /// 根目录直接取自库公开的 `wslcsdk::default_session_root`，不在此复刻

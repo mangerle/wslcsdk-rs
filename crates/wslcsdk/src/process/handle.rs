@@ -241,6 +241,13 @@ impl WslcProcessHandle {
     /// 或 [`WslcContainerHandle::with_init_process_io_callbacks`](WslcContainerHandle::with_init_process_io_callbacks)
     /// 构造的进程，均视为已消耗 IO 句柄。
     ///
+    /// # 已知限制
+    ///
+    /// 该判定基于句柄**构造时快照**的状态，此后不回查所属容器。因此若
+    /// 先 [`WslcContainerHandle::get_init_process`] 取得句柄、再调用
+    /// `with_init_process_io_callbacks`，前者无从得知 IO 句柄已被消耗。
+    /// 请始终先注册回调、再取进程句柄。
+    ///
     /// # 所有权与生命周期
     /// 返回的 Win32 文件流句柄（`HANDLE`）由底层容器进程管理生命周期，属于借用。
     /// 调用方可用于直接读取或写入进程标准流，但**严禁**调用 `CloseHandle`，

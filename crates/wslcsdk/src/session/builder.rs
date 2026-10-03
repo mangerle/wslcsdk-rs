@@ -297,16 +297,16 @@ impl SessionBuilder {
         raw: WslcSession,
         name: String,
     ) -> Result<WslcSessionHandle, WslcError> {
-        match HandleMtaLease::acquire() {
-            Ok(mta) => Ok(WslcSessionHandle::from_acquired_lease(raw, name, mta)),
-            Err(e) => {
-                // SAFETY: raw 由本次 WslcCreateSession 成功返回且已判空，
-                // 错误路径下由本处负责回收，不会重复释放。
-                unsafe {
-                    let _ = WslcReleaseSession(raw);
-                }
-                Err(e)
-            }
+        // SAFETY: raw 由本次 WslcCreateSession 成功返回且已判空，
+        // WslcReleaseSession 是与之匹配的释放函数。
+        unsafe {
+            HandleMtaLease::wrap_raw(
+                raw,
+                |h| {
+                    let _ = WslcReleaseSession(h);
+                },
+                |raw, mta| WslcSessionHandle::from_acquired_lease(raw, name, mta),
+            )
         }
     }
 }

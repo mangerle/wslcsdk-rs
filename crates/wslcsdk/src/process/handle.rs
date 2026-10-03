@@ -108,17 +108,58 @@ impl WslcProcessHandle {
     ///
     /// 违反上述任一条件都会导致句柄被重复释放或释放无效指针，构成未定义行为。
     /// 常规场景请改用 [`ProcessBuilder::spawn`](crate::ProcessBuilder::spawn)。
+    ///
+    /// # 租约降级
+    ///
+    /// 本方法是全库唯一在取不到进程级 MTA 租约时仍返回句柄的入口：它降级为
+    /// `degraded` 租约并记录 `error!` 日志，句柄在 MTA 被注销后析构可能崩溃。
+    /// 这是为维持 `unsafe fn` 的既有签名而作的让步——安全路径
+    /// [`ProcessBuilder::spawn`](crate::ProcessBuilder::spawn) 已改走
+    /// `try_from_raw_with_stream`，失败即返回错误并回收裸句柄。
     pub unsafe fn from_raw(raw: WslcProcess, container: WslcContainerHandle) -> Self {
-        Self::from_raw_with_stream(raw, container, None)
+        let mta = HandleMtaLease::acquire().unwrap_or_else(|e| {
+            log::error!("为外部进程句柄获取 MTA 租约失败，析构时可能崩溃: {e}");
+            HandleMtaLease::degraded()
+        });
+        Self::build(raw, ProcessOwnership::Owned { container }, None, mta)
     }
 
     /// 构造拥有 `raw` 所有权、且关联所属容器的进程包装对象
-    pub(crate) fn from_raw_with_stream(
+    ///
+    /// 取租约失败时**回收裸句柄并返回错误**，而非降级：本方法经
+    /// [`ProcessBuilder::spawn`](crate::ProcessBuilder::spawn) 对**安全公开
+    /// API** 可达，调用方无从感知「该句柄析构时可能崩溃」这一风险，只能拿到
+    /// 一个 `Ok(handle)` 加一行日志。
+    ///
+    /// 这与会话、容器两条创建路径的处理一致——三处同类逻辑不应两处严格、
+    /// 一处降级，而降级的恰好是安全 API 可达的那一处。
+    ///
+    /// # Errors
+    ///
+    /// `CoIncrementMTAUsage` 失败时返回错误，此时 `raw` 已被回收。
+    pub(crate) fn try_from_raw_with_stream(
         raw: WslcProcess,
         container: WslcContainerHandle,
         stream_state: Option<Arc<StreamState>>,
-    ) -> Self {
-        Self::new_inner(raw, ProcessOwnership::Owned { container }, stream_state)
+    ) -> Result<Self, WslcError> {
+        // SAFETY: raw 由本次 WslcCreateContainerProcess 成功返回且已判空，
+        // WslcReleaseProcess 是与之匹配的释放函数。
+        unsafe {
+            HandleMtaLease::wrap_raw(
+                raw,
+                |h| {
+                    let _ = WslcReleaseProcess(h);
+                },
+                |raw, mta| {
+                    Self::build(
+                        raw,
+                        ProcessOwnership::Owned { container },
+                        stream_state,
+                        mta,
+                    )
+                },
+            )
+        }
     }
 
     /// 构造仅借用 `raw`、由所属容器统一托管释放的进程包装对象
@@ -126,33 +167,38 @@ impl WslcProcessHandle {
     /// 用于 `WslcGetContainerInitProcess` 取得的 init 进程句柄：官方规范确证其归调用方拥有，
     /// 本库由所属容器统一托管并在容器析构时释放至多一次，本包装对象在析构时
     /// 不会重复调用 `WslcReleaseProcess`，杜绝重复释放与句柄泄漏。
-    pub(crate) fn from_borrowed(
+    ///
+    /// # Errors
+    ///
+    /// `CoIncrementMTAUsage` 失败时返回错误。此处**不释放** `raw`——它归所属
+    /// 容器托管，本包装对象从未取得其所有权。
+    pub(crate) fn try_from_borrowed(
         raw: WslcProcess,
         container: WslcContainerHandle,
         stream_state: Option<Arc<StreamState>>,
-    ) -> Self {
-        Self::new_inner(raw, ProcessOwnership::Borrowed { container }, stream_state)
+    ) -> Result<Self, WslcError> {
+        let mta = HandleMtaLease::acquire()?;
+        Ok(Self::build(
+            raw,
+            ProcessOwnership::Borrowed { container },
+            stream_state,
+            mta,
+        ))
     }
 
-    fn new_inner(
+    /// 按给定所有权与租约装配包装对象
+    fn build(
         raw: WslcProcess,
         ownership: ProcessOwnership,
         stream_state: Option<Arc<StreamState>>,
+        mta: HandleMtaLease,
     ) -> Self {
-        // 租约保证句柄存活期内进程级 MTA 不被注销。此处刻意不做错误返回：
-        // 三个调用方（spawn / from_raw / from_borrowed）中后者为 unsafe 构造器，
-        // 让它们传播 Result 会改变既有签名。取不到租约时降级并记录错误，
-        // 风险仅限于该进程句柄析构时可能崩溃。
-        let _mta = HandleMtaLease::acquire().unwrap_or_else(|e| {
-            log::error!("为进程句柄获取 MTA 租约失败，析构时可能崩溃: {e}");
-            HandleMtaLease::degraded()
-        });
         Self {
             inner: Arc::new(ProcessInner {
                 raw,
                 ownership,
                 _stream_state: stream_state,
-                _mta,
+                _mta: mta,
             }),
         }
     }

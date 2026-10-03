@@ -131,31 +131,29 @@ impl WslcContainerHandle {
         session: WslcSessionHandle,
         init_stream_state: Option<Arc<StreamState>>,
     ) -> Result<Self, WslcError> {
-        // 租约须在句柄结构体构造**之前**取得：若把 `acquire()?` 写在结构体
-        // 字面量内部，租约获取失败时 `?` 会提前返回，而 `raw` 已由官方成功
-        // 创建却无人接管，`WslcReleaseContainer` 永不执行，句柄泄漏。
-        let mta = match HandleMtaLease::acquire() {
-            Ok(lease) => lease,
-            Err(e) => {
-                // 失败路径上句柄所有权尚未移交本对象，由本处负责回收
-                // SAFETY: `raw` 由本次 `WslcOpenContainer` / `WslcCreateContainer`
-                // 成功返回，且已判空，错误路径下无其他持有者，释放恰好执行一次。
-                unsafe {
-                    let _ = WslcReleaseContainer(raw);
-                }
-                return Err(e);
-            }
-        };
-
-        Ok(Self {
-            inner: Arc::new(ContainerInner {
+        // 租约与裸句柄的接管顺序由 wrap_raw 统一保证：租约获取失败时先
+        // WslcReleaseContainer 回收裸句柄再返回错误，杜绝句柄泄漏。
+        // 顺序约束的论证见 HandleMtaLease::wrap_raw。
+        //
+        // SAFETY: `raw` 由本次 `WslcOpenContainer` / `WslcCreateContainer`
+        // 成功返回且已判空，WslcReleaseContainer 是与之匹配的释放函数。
+        unsafe {
+            HandleMtaLease::wrap_raw(
                 raw,
-                _session: session,
-                _mta: mta,
-                init_stream_state: Mutex::new(init_stream_state),
-                init_process_raw: Mutex::new(InitProcessSource::Unfetched),
-            }),
-        })
+                |h| {
+                    let _ = WslcReleaseContainer(h);
+                },
+                |raw, mta| Self {
+                    inner: Arc::new(ContainerInner {
+                        raw,
+                        _session: session,
+                        _mta: mta,
+                        init_stream_state: Mutex::new(init_stream_state),
+                        init_process_raw: Mutex::new(InitProcessSource::Unfetched),
+                    }),
+                },
+            )
+        }
     }
 
     /// 通过名称或容器 ID 打开已存在的容器
@@ -315,7 +313,7 @@ impl WslcContainerHandle {
     pub fn get_init_process(&self) -> Result<WslcProcessHandle, WslcError> {
         // 先在锁内查缓存：命中则无需发起任何 SDK 调用
         if let Some(raw) = self.cached_init_process() {
-            return Ok(self.wrap_init_process(raw));
+            return self.wrap_init_process(raw);
         }
 
         // 未缓存：在锁外发起可能长时间阻塞的 COM/RPC 调用。
@@ -353,7 +351,7 @@ impl WslcContainerHandle {
             }
         };
 
-        Ok(self.wrap_init_process(effective))
+        self.wrap_init_process(effective)
     }
 
     /// 读取已缓存的 init 进程句柄，未缓存时返回 `None`
@@ -373,7 +371,7 @@ impl WslcContainerHandle {
     ///
     /// 与 [`Self::get_init_process`] 分离，是为了让「取句柄」与「包装」各自
     /// 保持单一职责，也使缓存命中与未命中两条路径复用同一段包装逻辑。
-    fn wrap_init_process(&self, raw: WslcProcess) -> WslcProcessHandle {
+    fn wrap_init_process(&self, raw: WslcProcess) -> Result<WslcProcessHandle, WslcError> {
         let stream_state = self
             .inner
             .init_stream_state
@@ -381,7 +379,7 @@ impl WslcContainerHandle {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
 
-        WslcProcessHandle::from_borrowed(raw, self.clone(), stream_state)
+        WslcProcessHandle::try_from_borrowed(raw, self.clone(), stream_state)
     }
 
     /// 为容器 init 主进程注册流式标准 IO 回调 (标准输出与标准错误)

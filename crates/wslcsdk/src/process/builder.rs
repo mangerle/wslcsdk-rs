@@ -305,11 +305,8 @@ impl ProcessBuilder {
 
         log::info!("容器内新进程派生成功，命令行: {}", cmd_repr);
 
-        Ok(WslcProcessHandle::from_raw_with_stream(
-            raw_process,
-            container.clone(),
-            stream_state,
-        ))
+        // 取租约失败时该句柄会被回收并返回错误，不会返回一个析构即崩溃的对象
+        WslcProcessHandle::try_from_raw_with_stream(raw_process, container.clone(), stream_state)
     }
 }
 

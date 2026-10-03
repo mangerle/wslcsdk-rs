@@ -9,6 +9,9 @@ on:
     branches:
       - main
       - master
+  # 端到端用例需要真实的 WSL Containers 运行时，GitHub 托管 runner 不具备，
+  # 故不随常规触发执行，改由维护者在具备运行时的机器上手动发起
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -17,6 +20,24 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  audit:
+    name: 依赖漏洞审计 (cargo audit)
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 安装 cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: 审计依赖树中的已知漏洞
+        # 本项目随包分发 wslcsdk.dll 与导入库，供应链信任完全依赖依赖树，
+        # 故必须持续校验。RUSTSEC  advisories 为数据源，新增漏洞会在此暴露。
+        run: cargo audit --deny warnings
+
   format:
     name: 格式规范检查 (cargo fmt)
     runs-on: windows-latest
@@ -31,6 +52,24 @@ jobs:
 
       - name: 执行格式检查
         run: cargo fmt --all -- --check
+
+  msrv:
+    name: 最低支持版本校验 (rust-version 1.98.1)
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置声明的 MSRV 工具链
+        # 与 Cargo.toml 的 rust-version 保持一致；两处必须同步修改。
+        # 声明了 MSRV 却从不校验，等于把「最低可用版本」变成一句无人
+        # 保证的承诺——下游按该版本构建时才发现问题已晚。
+        uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: 校验在 MSRV 下可编译
+        run: cargo check --workspace --all-targets --target x86_64-pc-windows-msvc
 
   clippy:
     name: 静态代码分析 (cargo clippy)
@@ -126,6 +165,27 @@ jobs:
             exit 1
           }
           Write-Output "全部 $($required.Count) 个原生文件均已包含"
+
+  e2e-manual:
+    name: 端到端回归 (仅手动触发，需真实 WSLC 运行时)
+    # 常规 push/PR 不执行：GitHub 托管的 windows-latest 未启用 WSL 虚拟机
+    # 平台，也不含 wslcsdk.dll，端到端用例必然失败。
+    # 由维护者在具备 WSL Containers 的机器上通过 workflow_dispatch 发起。
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: 执行被忽略的端到端用例
+        # 覆盖会话创建、容器启停、流式 IO 与客户端门面等真实 SDK 交互——
+        # 这些路径在常规 CI 中零覆盖，回归风险恰集中在最不被验证的一层
+        run: cargo test --workspace --all-targets -- --ignored
 
   docs:
     name: 文档仿真构建检查 (cargo doc)

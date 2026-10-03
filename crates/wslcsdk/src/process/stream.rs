@@ -135,25 +135,39 @@ impl ProcessStreams {
     }
 }
 
-/// 构建流式通道与关联的回调结构
+/// 一次流式会话建立后交付给调用方的全部产物
 ///
-/// 返回的第二个元素为全局注册表中的流 ID，直接作为回调上下文使用，
-/// 以整数代替裸指针可避免在 [`ProcessBuilder`](crate::ProcessBuilder) 中
-/// 引入裸指针字段与随之而来的 `unsafe impl Send/Sync` 断言。
-pub(crate) fn setup_streaming_channels(
-    capacity: usize,
-) -> (
-    WslcProcessCallbacks,
-    usize,
-    Arc<StreamState>,
-    ProcessStreams,
-) {
+/// 以具名字段承载而非四元组：调用方无需靠位置记忆「第二个是上下文 ID、
+/// 第三个是共享状态」这类隐式约定，增删字段也不会静默改变解构顺序。
+pub(crate) struct StreamingSetup {
+    /// 交给官方注册的回调结构
+    pub(crate) callbacks: WslcProcessCallbacks,
+    /// 回调上下文，即全局注册表中的流 ID
+    ///
+    /// 以整数代替裸指针，可避免在 [`ProcessBuilder`](crate::ProcessBuilder)
+    /// 中引入裸指针字段与随之而来的 `unsafe impl Send/Sync` 断言。
+    pub(crate) context: usize,
+    /// 与本次流式会话关联的共享状态
+    pub(crate) state: Arc<StreamState>,
+    /// 调用方用于消费字节流与退出通知的接收端
+    pub(crate) streams: ProcessStreams,
+}
+
+/// 构建流式通道与关联的回调结构
+pub(crate) fn setup_streaming_channels(capacity: usize) -> StreamingSetup {
     let cap = capacity.max(1);
     let (stdout_tx, stdout_rx) = mpsc::channel::<Vec<u8>>(cap);
     let (stderr_tx, stderr_rx) = mpsc::channel::<Vec<u8>>(cap);
     let (exit_tx, exit_rx) = oneshot::channel::<i32>();
 
-    let id = NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed);
+    // 0 被回调跳板用作「无上下文」的哨兵值（context.is_null()），
+    // 必须跳过：否则回绕到 0 的流会被当成无效上下文而丢弃全部数据
+    let id = loop {
+        let candidate = NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed);
+        if candidate != 0 {
+            break candidate;
+        }
+    };
 
     let state = Arc::new(StreamState {
         id,
@@ -178,7 +192,12 @@ pub(crate) fn setup_streaming_channels(
         stream_state: state.clone(),
     };
 
-    (callbacks, id as usize, state, streams)
+    StreamingSetup {
+        callbacks,
+        context: id as usize,
+        state,
+        streams,
+    }
 }
 
 #[cfg(test)]
@@ -188,14 +207,7 @@ mod tests {
     use wslcsdk_sys::types::WslcProcessIOHandle;
 
     /// 驱动一次流式会话，返回其回调、上下文 ID、状态与接收端
-    fn setup(
-        capacity: usize,
-    ) -> (
-        WslcProcessCallbacks,
-        usize,
-        Arc<StreamState>,
-        ProcessStreams,
-    ) {
+    fn setup(capacity: usize) -> StreamingSetup {
         setup_streaming_channels(capacity)
     }
 
@@ -247,23 +259,23 @@ mod tests {
 
     #[test]
     fn test_registry_entry_lifecycle() {
-        let (callbacks, context, state, streams) = setup(8);
-        assert!(callbacks.on_stdout.is_some(), "必须注册标准输出回调");
-        assert!(callbacks.on_stderr.is_some(), "必须注册标准错误回调");
-        assert!(callbacks.on_exit.is_some(), "必须注册退出回调");
+        let setup = setup(8);
+        assert!(setup.callbacks.on_stdout.is_some(), "必须注册标准输出回调");
+        assert!(setup.callbacks.on_stderr.is_some(), "必须注册标准错误回调");
+        assert!(setup.callbacks.on_exit.is_some(), "必须注册退出回调");
 
         // 状态存活期间，注册表可经 ID 取出强引用
-        assert!(stream_registry().contains_key(&(context as u64)));
+        assert!(stream_registry().contains_key(&(setup.context as u64)));
 
-        let id = state.id;
+        let id = setup.state.id;
         // StreamState 的强引用由建造者返回值与 ProcessStreams 各持一份，
         // 两者全部释放后才会真正析构并注销注册表条目
-        drop(state);
+        drop(setup.state);
         assert!(
             stream_registry().contains_key(&id),
             "仅释放一份强引用时注册表条目应仍然存在"
         );
-        drop(streams);
+        drop(setup.streams);
         assert!(
             !stream_registry().contains_key(&id),
             "流状态析构后注册表条目应被移除"
@@ -273,7 +285,8 @@ mod tests {
     #[test]
     fn test_trampoline_routes_payload_to_matching_channel() {
         let rt = test_runtime();
-        let (_callbacks, context, _state, mut streams) = setup(8);
+        let mut setup = setup(8);
+        let (context, streams) = (setup.context, &mut setup.streams);
 
         rt.block_on(async {
             // SAFETY: context 由 setup 返回且 state 仍存活
@@ -292,7 +305,8 @@ mod tests {
     fn test_backpressure_drops_and_accumulates_byte_count() {
         let rt = test_runtime();
         // 容量为 1 且消费端停滞，用于触发背压丢弃
-        let (_callbacks, context, state, mut streams) = setup(1);
+        let mut setup = setup(1);
+        let (context, state, streams) = (setup.context, setup.state.clone(), &mut setup.streams);
 
         rt.block_on(async {
             // SAFETY: context 由 setup 返回且 state 仍存活
@@ -321,7 +335,8 @@ mod tests {
 
     #[test]
     fn test_trampoline_ignores_invalid_inputs() {
-        let (_callbacks, context, _state, mut streams) = setup(4);
+        let mut setup = setup(4);
+        let (context, streams) = (setup.context, &mut setup.streams);
         let ctx = context as *mut c_void;
 
         // SAFETY: context 有效；下列三种异常输入均须被安全忽略而不得崩溃
@@ -348,10 +363,11 @@ mod tests {
 
     #[test]
     fn test_callback_after_state_released_is_ignored() {
-        let (_callbacks, context, state, streams) = setup(4);
-        let id = state.id;
-        drop(state);
-        drop(streams);
+        let setup = setup(4);
+        let id = setup.state.id;
+        let context = setup.context;
+        drop(setup.state);
+        drop(setup.streams);
 
         // 注册表条目已随状态析构移除。此时 C 侧若仍触发回调必须被安全忽略，
         // 绝不能访问已释放的内存
@@ -363,7 +379,8 @@ mod tests {
     #[test]
     fn test_exit_trampoline_delivers_code() {
         let rt = test_runtime();
-        let (_callbacks, context, _state, mut streams) = setup(4);
+        let mut setup = setup(4);
+        let (context, streams) = (setup.context, &mut setup.streams);
 
         rt.block_on(async {
             // SAFETY: context 由 setup 返回且 state 仍存活
@@ -375,7 +392,8 @@ mod tests {
     #[test]
     fn test_exit_trampoline_with_null_context_is_ignored() {
         let rt = test_runtime();
-        let (_callbacks, _context, _state, mut streams) = setup(4);
+        let mut setup = setup(4);
+        let streams = &mut setup.streams;
 
         rt.block_on(async {
             // SAFETY: 空上下文是合法的「无订阅」情形，应被安全忽略
@@ -391,7 +409,8 @@ mod tests {
     #[test]
     fn test_exit_closes_io_channels_so_consumer_loop_terminates() {
         let rt = test_runtime();
-        let (_callbacks, context, _state, mut streams) = setup(4);
+        let mut setup = setup(4);
+        let (context, streams) = (setup.context, &mut setup.streams);
 
         rt.block_on(async {
             // 退出回调触发前，通道保持开启，可持续接收数据
@@ -420,9 +439,7 @@ mod tests {
     #[test]
     fn test_zero_capacity_is_normalized_to_one() {
         // 容量为 0 时应被归一化为 1，避免出现无缓冲的退化通道
-        let (_callbacks, _context, _state, mut streams) = setup(0);
-        // SAFETY: 仅观察通道状态，不触碰裸指针
-        let _ = &mut streams;
-        assert_eq!(streams.stdout_dropped_bytes(), 0);
+        let setup = setup(0);
+        assert_eq!(setup.streams.stdout_dropped_bytes(), 0);
     }
 }

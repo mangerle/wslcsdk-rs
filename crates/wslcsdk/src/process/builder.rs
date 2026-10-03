@@ -141,13 +141,13 @@ impl ProcessBuilder {
 
     /// 启用基于指定有界通道容量的异步流式 I/O 捕获
     pub fn with_streaming_io_capacity(mut self, capacity: usize) -> (Self, ProcessStreams) {
-        let (callbacks, stream_id, state, streams) = setup_streaming_channels(capacity);
+        let setup = setup_streaming_channels(capacity);
         self.callback_mode = ProcessCallbackMode::Registered {
-            callbacks,
-            context: stream_id,
+            callbacks: setup.callbacks,
+            context: setup.context,
         };
-        self.stream_state = Some(state);
-        (self, streams)
+        self.stream_state = Some(setup.state);
+        (self, setup.streams)
     }
 
     /// 获取关联的异步流式状态句柄克隆

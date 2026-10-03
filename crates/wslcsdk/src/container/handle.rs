@@ -417,14 +417,14 @@ impl WslcContainerHandle {
             return Err(WslcError::InvalidHandle);
         }
 
-        let (callbacks, stream_id, state, streams) = setup_streaming_channels(capacity);
+        let setup = setup_streaming_channels(capacity);
         // SAFETY: 入参均为已初始化且存活期覆盖本次调用的本地缓冲区或官方句柄，
         // 出参为合法的可写指针，不涉及未定义行为。
         let hr = unsafe {
             WslcSetContainerInitProcessIOCallbacks(
                 self.inner.raw,
-                &callbacks,
-                stream_id as *mut core::ffi::c_void,
+                &setup.callbacks,
+                setup.context as *mut core::ffi::c_void,
             )
         };
         WslcError::check_hr(hr, "设置主进程 IO 回调失败")?;
@@ -434,8 +434,8 @@ impl WslcContainerHandle {
             .inner
             .init_stream_state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(state);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(setup.state);
 
-        Ok(streams)
+        Ok(setup.streams)
     }
 }

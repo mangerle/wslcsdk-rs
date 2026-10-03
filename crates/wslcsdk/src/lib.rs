@@ -8,7 +8,9 @@
 //! 在非 Windows 目标上编译会立即得到一条明确的 `compile_error!` 提示，
 //! 而非在 `std::os::windows` 等处报出难以定位的错误。
 
-#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+// `doc_auto_cfg` 已于 Rust 1.92.0 被移除并合并入 `doc_cfg`（rust-lang/rust#138907），
+// 继续书写旧名称会在 nightly 上直接触发 E0557 使 docs.rs 构建失败，故此处使用新名称。
+#![cfg_attr(docsrs, feature(doc_cfg))]
 // 本 crate 大量使用 FFI 与裸指针，逐项论证成本高，故强制显式书写 unsafe 块：
 // 开启该 lint 后，unsafe fn 体内的裸操作必须被 unsafe 块包裹，编译器据此
 // 校验「函数签名承诺不安全」与「实现确实逐处声明」两者一致。

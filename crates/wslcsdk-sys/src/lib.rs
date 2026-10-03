@@ -7,7 +7,9 @@
 //! 本 crate 绑定的是 Windows 专有 DLL，**仅支持 Windows 平台**。
 //! 在非 Windows 目标上编译会立即得到一条明确的 `compile_error!` 提示。
 
-#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+// `doc_auto_cfg` 已于 Rust 1.92.0 被移除并合并入 `doc_cfg`（rust-lang/rust#138907），
+// 继续书写旧名称会在 nightly 上直接触发 E0557 使 docs.rs 构建失败，故此处使用新名称。
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 #[cfg(not(windows))]
 compile_error!("wslcsdk-sys 仅支持 Windows 平台：其绑定目标 wslcsdk.dll 为 Windows 专有组件");
